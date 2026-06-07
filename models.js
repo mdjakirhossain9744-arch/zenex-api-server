@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 
-// User Schema (Strict: false দেওয়ায় আগের সব ডাটা অটোমেটিক পেয়ে যাবে)
+// User Schema
 const userSchema = new mongoose.Schema({
     email: String,
     apiKey: String,
@@ -14,7 +14,7 @@ const userSchema = new mongoose.Schema({
     balance: Number,
     agentEarning: Number,
     autoPayEnabled: Boolean
-}, { strict: false });
+}, { strict: false, timestamps: true }); // 💥 Added timestamps 💥
 
 // Order Schema
 const orderSchema = new mongoose.Schema({
@@ -30,7 +30,7 @@ const orderSchema = new mongoose.Schema({
     otp: String,
     orderCost: Number,
     orderCommission: Number
-}, { strict: false });
+}, { strict: false, timestamps: true }); // 💥 Added timestamps 💥
 
 export const User = mongoose.model('User', userSchema);
 export const Order = mongoose.model('Order', orderSchema);
