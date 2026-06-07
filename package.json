@@ -1,0 +1,21 @@
+{
+  "name": "zenex-api-server",
+  "version": "1.0.0",
+  "description": "Enterprise API Microservice for ZENEX",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "ZENEX NETWORK",
+  "license": "ISC",
+  "dependencies": {
+    "@fastify/cors": "^11.2.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.8.5",
+    "ioredis": "^5.11.1",
+    "mongoose": "^9.6.3"
+  }
+}
