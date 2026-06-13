@@ -89,7 +89,7 @@ fastify.post('/v1/getnum', async (request, reply) => {
 });
 
 // ==========================================
-// ⚡ 2. OTP INFO API (0ms Response Tunnel)
+// ⚡ 2. OTP INFO API (0ms Response Tunnel - DATABASE BACKED)
 // ==========================================
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
     try {
@@ -123,16 +123,18 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
             if (response.ok) {
                 mnetData = await response.json();
             } else {
-                return reply.status(504).send({ meta: { status: "error" }, message: "Provider Error" });
+                // Not returning error right away, we will still serve DB data below
+                console.log("MNIT response not OK in sync");
             }
         } catch (fetchError) {
             clearTimeout(timeoutId);
-            return reply.status(504).send({ meta: { status: "error" }, message: "Provider Timeout" });
+            // Not returning timeout error right away, serve DB data below
+            console.log("MNIT Timeout in sync");
         }
 
+        // --- 🔴 START OF MNIT SYNC LOGIC (Unchanged existing Logic) 🔴 ---
         const rawOtps = mnetData?.data?.otps;
         const liveOtps = Array.isArray(rawOtps) ? rawOtps : [];
-        let userSpecificOtps = [];
 
         if (liveOtps.length > 0) {
             const liveNumbers = liveOtps.map(o => String(o.number).replace(/\D/g, ""));
@@ -154,12 +156,6 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
                 const matchedOtpObj = liveOtps.find(m => String(m.number).replace(/\D/g, "").endsWith(last6));
 
                 if (matchedOtpObj) {
-                    const customOtpObj = {
-                        ...matchedOtpObj,
-                        nid: matchedOtpObj.nid ? matchedOtpObj.nid.replace(/^M_/i, 'ZX_') : matchedOtpObj.nid
-                    };
-                    userSpecificOtps.push(customOtpObj);
-
                     const incomingMsg = (matchedOtpObj.otp || "").trim();
                     const incomingMatch = incomingMsg.match(/\b\d{4,8}\b/);
                     const incomingCode = incomingMatch ? incomingMatch[0] : incomingMsg;
@@ -225,10 +221,46 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
                 }
             }
         }
+        // --- 🔴 END OF MNIT SYNC LOGIC 🔴 ---
 
+
+        // --- 🟢 NEW: FETCH FROM OUR MONGODB SINGLE SOURCE OF TRUTH 🟢 ---
+        // Fetch User's Orders from the last 20 minutes (using updatedAt)
+        const twentyMinutesAgo = new Date(Date.now() - 20 * 60 * 1000);
+        
+        const recentOrders = await Order.find({
+            userEmail: user.email,
+            status: { $in: ["WAIT", "DONE"] },
+            updatedAt: { $gte: twentyMinutesAgo }
+        }).sort({ updatedAt: -1 }).lean();
+
+        // Format exactly like MNIT so third-party tools don't break
+        const databaseOtps = recentOrders.map(order => {
+            // Formatting Date to "YYYY-MM-DD HH:mm:ss"
+            const d = new Date(order.updatedAt || order.createdAt);
+            const pad = (n) => n.toString().padStart(2, '0');
+            const formattedDate = `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+            
+            // Reconstruct the message exactly as MNIT sends it
+            let finalOtpText = "";
+            if (order.status === "DONE") {
+                finalOtpText = order.fullMessage || order.otp || "";
+            }
+
+            return {
+                nid: "ZX_" + order._id.toString().substring(0, 10).toUpperCase(),
+                number: String(order.displayNumber || order.searchNumber || "").replace(/\D/g, ""),
+                otp: finalOtpText,
+                country: order.country || "Unknown",
+                operator: order.operator || "Any",
+                created_at: formattedDate
+            };
+        });
+
+        // 🚀 ALWAYS RETURN MONGODB DATA (No dropped OTPs anymore!)
         return reply.status(200).send({
             meta: mnetData?.meta || { status: "success", code: 200 },
-            data: { otps: userSpecificOtps }
+            data: { otps: databaseOtps }
         });
 
     } catch (error) {
