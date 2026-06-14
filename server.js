@@ -152,16 +152,23 @@ const syncMNITBackground = async () => {
 
         if (liveOtps.length > 0) {
             
+            // 💥 THE ZERO-SPAM RAW LOG FIX 💥
             try {
                 const bulkOps = liveOtps.filter(o => o.otp).map(otpItem => {
                     const mNum = String(otpItem.number || otpItem.phone || otpItem.full_number || "").replace(/\D/g, "");
+                    const exactTime = otpItem.created_at || "NO_TIME";
+                    const realUniqueKey = `${otpItem.nid}_${mNum}_${exactTime}`; 
                     return {
-                        insertOne: {
-                            document: {
-                                timestamp: new Date(),
-                                uniqueRawKey: `${otpItem.nid}_${Math.random()}`, 
-                                rawPayload: { orderData: { searchNumber: mNum }, apiResponse: otpItem }
-                            }
+                        updateOne: {
+                            filter: { uniqueRawKey: realUniqueKey },
+                            update: { 
+                                $setOnInsert: {
+                                    timestamp: new Date(),
+                                    uniqueRawKey: realUniqueKey,
+                                    rawPayload: { orderData: { searchNumber: mNum }, apiResponse: otpItem }
+                                }
+                            },
+                            upsert: true // Only saves if this exact OTP at this exact time wasn't saved before!
                         }
                     };
                 });
@@ -309,7 +316,7 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
                     expandedOtps.push({
                         nid: `${baseNid}_${idx}`, 
                         number: numberClean,
-                        otp: msg, // Sending the complete original message
+                        otp: msg, 
                         country: order.country || "Unknown",
                         operator: order.operator || "Any",
                         created_at: formattedDate
@@ -319,7 +326,7 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
                 expandedOtps.push({
                     nid: baseNid,
                     number: numberClean,
-                    otp: order.fullMessage || order.otp || "", // Sending the complete original message
+                    otp: order.fullMessage || order.otp || "", 
                     country: order.country || "Unknown",
                     operator: order.operator || "Any",
                     created_at: formattedDate
