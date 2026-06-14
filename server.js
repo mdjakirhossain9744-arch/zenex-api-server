@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import { User, Order } from './models.js';
+import fastifyRateLimit from '@fastify/rate-limit'; // 🔥 Added for DDoS Protection & Tool Handling
 
 dotenv.config();
 
@@ -14,17 +15,28 @@ fastify.register(import('@fastify/cors'), {
     allowedHeaders: ['Content-Type', 'mapikey']
 });
 
+// 🔥 Soft Throttling (Rate Limiter): Max 10 requests per second per API Key
+fastify.register(fastifyRateLimit, {
+    max: 10,
+    timeWindow: '1 second',
+    keyGenerator: req => req.headers['mapikey'] || req.ip,
+    errorResponseBuilder: function (request, context) {
+        return { meta: { status: "error", code: 429 }, message: "Too Many Requests - Slow down (Soft Throttling active)" };
+    }
+});
+
 const connectDB = async () => {
     try {
         const opts = { maxPoolSize: 100, minPoolSize: 10 };
         await mongoose.connect(process.env.MONGODB_URI, opts);
         console.log('✅ ZENEX Database Connected to API Microservice! 🚀');
 
+        // 🔥 Advanced Compound Indexing for Ultra-Low Latency (< 50ms)
         try {
-            await mongoose.connection.collection('mnit_raw_logs').createIndex(
-                { "timestamp": 1 }, 
-                { expireAfterSeconds: 172800 } 
-            );
+            const db = mongoose.connection;
+            await db.collection('mnit_raw_logs').createIndex({ "timestamp": 1 }, { expireAfterSeconds: 172800 });
+            await db.collection('orders').createIndex({ userEmail: 1, status: 1, createdAt: -1 });
+            await db.collection('orders').createIndex({ status: 1, updatedAt: -1 });
         } catch(e) { } 
 
     } catch (error) {
@@ -47,7 +59,7 @@ async function triggerBinanceAutoPay(user) {
 }
 
 // ==========================================
-// 🚀 1. GET NUMBER API
+// 🚀 1. GET NUMBER API (Optimized for Bots & Tools)
 // ==========================================
 fastify.route({
     method: ['GET', 'POST'], 
@@ -62,6 +74,9 @@ fastify.route({
 
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 20000); 
+
+            // 🔥 Connection Drop Management: Stop MNIT query instantly to save CPU if bot disconnects
+            request.raw.on('close', () => { if (request.raw.aborted) controller.abort(); });
 
             const reqData = request.body || request.query || {};
             const mnitPayload = {
@@ -152,7 +167,6 @@ const syncMNITBackground = async () => {
 
         if (liveOtps.length > 0) {
             
-            // 💥 THE ZERO-SPAM RAW LOG FIX 💥
             try {
                 const bulkOps = liveOtps.filter(o => o.otp).map(otpItem => {
                     const mNum = String(otpItem.number || otpItem.phone || otpItem.full_number || "").replace(/\D/g, "");
@@ -168,7 +182,7 @@ const syncMNITBackground = async () => {
                                     rawPayload: { orderData: { searchNumber: mNum }, apiResponse: otpItem }
                                 }
                             },
-                            upsert: true // Only saves if this exact OTP at this exact time wasn't saved before!
+                            upsert: true // Anti-Spam Raw Log
                         }
                     };
                 });
@@ -225,7 +239,7 @@ const syncMNITBackground = async () => {
 
                         const exactTime = matchedOtpObj.created_at || "NO_TIME";
                         const exactCountry = matchedOtpObj.country || "Unknown";
-                        const uniqueProcessKey = `${incomingCode}_${exactTime}_${exactCountry}`;
+                        const uniqueProcessKey = `${incomingCode}_${exactTime}_${exactCountry}`; // Zero-Loss Multi OTP Engine
 
                         if (order.processedKeys && order.processedKeys.includes(uniqueProcessKey)) continue; 
 
@@ -278,7 +292,7 @@ const syncMNITBackground = async () => {
 setInterval(syncMNITBackground, 5000);
 
 // ==========================================
-// ⚡ 3. OTP INFO API (💥 FULL MESSAGE RESTORED FOR BOTS)
+// ⚡ 3. OTP INFO API
 // ==========================================
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
     try {
@@ -309,28 +323,13 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
             const numberClean = String(order.displayNumber || order.searchNumber || "").replace(/\D/g, "");
             const baseNid = "ZX_" + order._id.toString().substring(0, 10).toUpperCase();
 
-            // 💥 FULL MESSAGE RESTORED 💥
             if (order.fullMessage && order.fullMessage.includes("_||_")) {
                 const msgsArray = order.fullMessage.split("_||_").map(m => m.trim()).filter(Boolean);
                 msgsArray.forEach((msg, idx) => {
-                    expandedOtps.push({
-                        nid: `${baseNid}_${idx}`, 
-                        number: numberClean,
-                        otp: msg, 
-                        country: order.country || "Unknown",
-                        operator: order.operator || "Any",
-                        created_at: formattedDate
-                    });
+                    expandedOtps.push({ nid: `${baseNid}_${idx}`, number: numberClean, otp: msg, country: order.country || "Unknown", operator: order.operator || "Any", created_at: formattedDate });
                 });
             } else {
-                expandedOtps.push({
-                    nid: baseNid,
-                    number: numberClean,
-                    otp: order.fullMessage || order.otp || "", 
-                    country: order.country || "Unknown",
-                    operator: order.operator || "Any",
-                    created_at: formattedDate
-                });
+                expandedOtps.push({ nid: baseNid, number: numberClean, otp: order.fullMessage || order.otp || "", country: order.country || "Unknown", operator: order.operator || "Any", created_at: formattedDate });
             }
         });
 
@@ -367,11 +366,7 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
         }
 
         const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-        const recentOrders = await Order.find({
-            status: { $in: ["DONE", "Success", "SUCCESS"] },
-            updatedAt: { $gte: oneHourAgo }
-        }).select("fullMessage otp searchNumber number").lean();
-
+        const recentOrders = await Order.find({ status: { $in: ["DONE", "Success", "SUCCESS"] }, updatedAt: { $gte: oneHourAgo } }).select("fullMessage otp searchNumber number").lean();
         const rangeMap = {};
 
         recentOrders.forEach((o) => {
@@ -390,11 +385,8 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
                         else if (match[0].length === 5) tag = "New Fb";
                     }
                 }
-
                 const key = `${rangeStr}|${service}|${tag}`;
-                if (!rangeMap[key]) {
-                    rangeMap[key] = { range: rangeStr, service: service, tag: tag, hits: 0 };
-                }
+                if (!rangeMap[key]) rangeMap[key] = { range: rangeStr, service: service, tag: tag, hits: 0 };
                 rangeMap[key].hits += 1;
             }
         });
@@ -404,9 +396,7 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
         lastFetchTime = Date.now();
 
         return reply.send({ success: true, cached: false, data: cachedActiveData });
-    } catch (error) {
-        return reply.status(500).send({ success: false, message: "Server Error" });
-    }
+    } catch (error) { return reply.status(500).send({ success: false, message: "Server Error" }); }
 });
 
 // ==========================================
@@ -416,25 +406,14 @@ fastify.get('/v1/user/today-otps', async (request, reply) => {
     try {
         const apiKey = request.headers['mapikey'];
         if (!apiKey) return reply.status(401).send({ error: "Invalid API Key" });
-
         const user = await User.findOne({ apiKey: apiKey.trim() }).select("email").lean();
         if (!user) return reply.status(401).send({ error: "Invalid API Key" });
-
         const todayStr = getUTCDateString();
-        const orders = await Order.find({
-            userEmail: user.email,
-            dateString: todayStr,
-            status: "DONE"
-        }).select("displayNumber otp -_id").lean();
-
+        const orders = await Order.find({ userEmail: user.email, dateString: todayStr, status: "DONE" }).select("displayNumber otp -_id").lean();
         if (orders.length === 0) return reply.type('text/plain').send("NO_DATA");
-
         const textData = orders.map((o) => `${String(o.displayNumber).replace(/\D/g, "")}|${o.otp}`).join('\n');
         return reply.type('text/plain').send(textData);
-
-    } catch (error) {
-        return reply.status(500).send({ error: "Server Error" });
-    }
+    } catch (error) { return reply.status(500).send({ error: "Server Error" }); }
 });
 
 const startServer = async () => {
@@ -442,10 +421,6 @@ const startServer = async () => {
         await connectDB();
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
         console.log(`⚡ ZENEX Microservice is LIVE at: http://localhost:${process.env.PORT || 4000}`);
-    } catch (err) {
-        console.error(err);
-        process.exit(1);
-    }
+    } catch (err) { process.exit(1); }
 };
-
 startServer();
