@@ -53,7 +53,14 @@ fastify.post('/v1/getnum', async (request, reply) => {
         try {
             response = await fetch("https://x.mnitnetwork.com/mapi/v1/public/getnum/number", {
                 method: "POST",
-                headers: { "mapikey": REAL_API_KEY, "Content-Type": "application/json" },
+                // 💥 THE MAGIC BYPASS HEADERS RESTORED 💥
+                headers: { 
+                    "mapikey": REAL_API_KEY, 
+                    "Content-Type": "application/json",
+                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; SM-G998B Build/SP1A.210812.016)",
+                    "Accept": "application/json",
+                    "Connection": "keep-alive"
+                },
                 body: JSON.stringify(request.body || {}),
                 signal: controller.signal
             });
@@ -98,7 +105,16 @@ const syncMNITBackground = async () => {
         let response;
         try {
             response = await fetch(`https://x.mnitnetwork.com/mapi/v1/public/numsuccess/info?t=${Date.now()}`, {
-                method: "GET", headers: { "mapikey": REAL_API_KEY, "Connection": "keep-alive" },
+                method: "GET", 
+                // 💥 THE MAGIC BYPASS HEADERS RESTORED HERE TOO 💥
+                headers: { 
+                    "mapikey": REAL_API_KEY, 
+                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; SM-G998B Build/SP1A.210812.016)",
+                    "Accept": "application/json",
+                    "Connection": "keep-alive",
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache"
+                },
                 signal: controller.signal
             });
             clearTimeout(timeoutId);
@@ -130,11 +146,11 @@ const syncMNITBackground = async () => {
                 }
             }
             
-            const twentyFiveMinsAgo = new Date(Date.now() - 25 * 60 * 1000);
-            const recentOrders = await Order.find({ 
-                status: { $in: ["WAIT", "DONE"] },
-                createdAt: { $gte: twentyFiveMinsAgo }
-            }).select("_id searchNumber userEmail fullMessage status").lean();
+            const recentOrders = await Order.find({ status: { $in: ["WAIT", "DONE"] } })
+                                            .sort({ _id: -1 })
+                                            .limit(4000)
+                                            .select("_id searchNumber userEmail fullMessage status")
+                                            .lean();
 
             for (const order of recentOrders) {
                 if (!order.searchNumber) continue;
@@ -181,18 +197,16 @@ const syncMNITBackground = async () => {
 
                     let regexStr = incomingCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-                    // 💥 BUG FIX: Removed { new: true } to clear Mongoose Logs 💥
                     const updatedOrder = await Order.findOneAndUpdate(
                         { _id: order._id, fullMessage: { $not: new RegExp(regexStr) } },
                         { 
                             $set: { status: "DONE", otp: incomingCode, fullMessage: order.fullMessage ? order.fullMessage + " _||_ " + incomingMsg : incomingMsg, expireAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) },
                             $inc: { orderCost: otpCost, orderCommission: otpCommission }
                         },
-                        { returnDocument: 'after' } 
+                        { returnDocument: 'after' }
                     );
 
                     if (updatedOrder && otpCost > 0) {
-                        // 💥 BUG FIX: Removed { new: true } to clear Mongoose Logs 💥
                         const updatedUser = await User.findOneAndUpdate({ _id: user._id }, { $inc: { balance: otpCost } }, { returnDocument: 'after' });
                         if (otpCommission > 0 && agentId) await User.updateOne({ _id: agentId }, { $inc: { agentEarning: otpCommission, balance: otpCommission } });
                         if (updatedUser && updatedUser.autoPayEnabled && updatedUser.balance >= 100) triggerBinanceAutoPay(updatedUser).catch(() => {});
