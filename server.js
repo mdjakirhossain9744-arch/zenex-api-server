@@ -108,7 +108,7 @@ fastify.post('/v1/getnum', async (request, reply) => {
 });
 
 // ==========================================
-// ⚡ 2. BACKGROUND WORKER (REAL MULTI-OTP ALLOWED)
+// ⚡ 2. BACKGROUND WORKER (ANTI-SPAM & REAL MULTI-OTP)
 // ==========================================
 let isSyncing = false;
 
@@ -146,17 +146,24 @@ const syncMNITBackground = async () => {
 
         if (liveOtps.length > 0) {
             
-            // 💥 CRYSTAL CLEAR RAW LOG FIX
+            // 💥 SUPER FILTER RAW LOG FIX: Prevents 5-sec spam, but catches Ivory Coast vs PostPaid perfectly!
             try {
                 const bulkOps = liveOtps.filter(o => o.otp).map(otpItem => {
                     const mNum = String(otpItem.number || otpItem.phone || otpItem.full_number || "").replace(/\D/g, "");
+                    const exactOtpText = otpItem.otp || "";
+                    const exactTime = otpItem.created_at || "NO_TIME";
+                    const exactCountry = otpItem.country || "NO_COUNTRY";
+                    
                     return {
-                        insertOne: {
-                            document: {
-                                timestamp: new Date(),
-                                uniqueRawKey: `${otpItem.nid}_${Math.random()}`, 
-                                rawPayload: { orderData: { searchNumber: mNum }, apiResponse: otpItem }
-                            }
+                        updateOne: {
+                            filter: { 
+                                "rawPayload.orderData.searchNumber": mNum, 
+                                "rawPayload.apiResponse.otp": exactOtpText,
+                                "rawPayload.apiResponse.created_at": exactTime,
+                                "rawPayload.apiResponse.country": exactCountry
+                            }, 
+                            update: { $setOnInsert: { timestamp: new Date(), rawPayload: { orderData: { searchNumber: mNum }, apiResponse: otpItem } } },
+                            upsert: true
                         }
                     };
                 });
@@ -191,7 +198,7 @@ const syncMNITBackground = async () => {
                 if (matchedOtps && matchedOtps.length > 0) {
                     for (const matchedOtpObj of matchedOtps) {
 
-                        // 💥 GHOST OTP SHIELD
+                        // GHOST OTP SHIELD
                         const orderTime = new Date(order.createdAt).getTime(); 
                         const otpTimeStr = matchedOtpObj.created_at;
                         if (otpTimeStr) {
@@ -202,7 +209,7 @@ const syncMNITBackground = async () => {
                         const incomingMsgRaw = (matchedOtpObj.otp || matchedOtpObj.code || matchedOtpObj.sms || matchedOtpObj.full_message || "").toString().trim();
                         const lowerMsg = incomingMsgRaw.toLowerCase();
                         
-                        // 💥 ANTI-GARBAGE SHIELD
+                        // ANTI-GARBAGE SHIELD
                         if (!incomingMsgRaw || ["waiting...", "waiting", "pending", "null", "false"].includes(lowerMsg)) continue;
                         if (!/\d/.test(incomingMsgRaw)) continue; 
                         if (/^[a-zA-Z0-9]{11}$/.test(incomingMsgRaw.trim()) && !/\s/.test(incomingMsgRaw)) continue; 
@@ -214,12 +221,11 @@ const syncMNITBackground = async () => {
                         }
                         if (!incomingCode || incomingCode.length < 3) continue; 
 
-                        // 💥 REAL MULTI-OTP ALLOWANCE (Code + Time + Country)
+                        // 💥 REAL MULTI-OTP KEY (Code + Time + Country)
                         const exactTime = matchedOtpObj.created_at || "NO_TIME";
                         const exactCountry = matchedOtpObj.country || "Unknown";
                         const uniqueProcessKey = `${incomingCode}_${exactTime}_${exactCountry}`;
 
-                        // Checks if this EXACT message from this specific time/country was processed
                         if (order.processedKeys && order.processedKeys.includes(uniqueProcessKey)) continue; 
 
                         const user = await User.findOne({ email: order.userEmail }).lean();
@@ -272,7 +278,7 @@ const syncMNITBackground = async () => {
 setInterval(syncMNITBackground, 5000);
 
 // ==========================================
-// ⚡ 3. OTP INFO API (BOT GLITCH 100% FIXED)
+// ⚡ 3. OTP INFO API
 // ==========================================
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
     try {
@@ -284,7 +290,6 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
 
         const twentyMinutesAgo = new Date(Date.now() - 20 * 60 * 1000);
         
-        // 💥 BOT BUG FIX: FETCH ONLY "DONE" STATUS
         const recentOrders = await Order.find({
             userEmail: user.email,
             status: "DONE", 
@@ -294,23 +299,45 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
         .sort({ updatedAt: -1 })
         .lean();
 
-        const databaseOtps = recentOrders.map(order => {
+        let expandedOtps = [];
+
+        recentOrders.forEach(order => {
             const d = new Date(order.updatedAt || order.createdAt);
             const pad = (n) => n.toString().padStart(2, '0');
             const formattedDate = `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
             
-            return {
-                nid: "ZX_" + order._id.toString().substring(0, 10).toUpperCase(),
-                number: String(order.displayNumber || order.searchNumber || "").replace(/\D/g, ""),
-                otp: order.otp || order.fullMessage || "", 
-                country: order.country || "Unknown",
-                operator: order.operator || "Any",
-                created_at: formattedDate
-            };
+            const numberClean = String(order.displayNumber || order.searchNumber || "").replace(/\D/g, "");
+            const baseNid = "ZX_" + order._id.toString().substring(0, 10).toUpperCase();
+
+            if (order.fullMessage && order.fullMessage.includes("_||_")) {
+                const msgsArray = order.fullMessage.split("_||_").map(m => m.trim()).filter(Boolean);
+                msgsArray.forEach((msg, idx) => {
+                    let extractedCode = msg;
+                    const match = msg.match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)/);
+                    if (match) extractedCode = match[0].trim();
+
+                    expandedOtps.push({
+                        nid: `${baseNid}_${idx}`, 
+                        number: numberClean,
+                        otp: extractedCode, 
+                        country: order.country || "Unknown",
+                        operator: order.operator || "Any",
+                        created_at: formattedDate
+                    });
+                });
+            } else {
+                expandedOtps.push({
+                    nid: baseNid,
+                    number: numberClean,
+                    otp: order.otp || order.fullMessage || "", 
+                    country: order.country || "Unknown",
+                    operator: order.operator || "Any",
+                    created_at: formattedDate
+                });
+            }
         });
 
-        // 💥 EXTRA SECURITY: Removes empty OTPs
-        const validOtps = databaseOtps.filter(o => o.otp && o.otp.trim() !== "" && !["waiting...", "pending", "null"].includes(o.otp.toLowerCase()));
+        const validOtps = expandedOtps.filter(o => o.otp && o.otp.trim() !== "" && !["waiting...", "pending", "null"].includes(o.otp.toLowerCase()));
 
         return reply.status(200).send({ meta: { status: "success", code: 200 }, data: { otps: validOtps } });
 
