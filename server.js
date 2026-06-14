@@ -20,13 +20,12 @@ const connectDB = async () => {
         await mongoose.connect(process.env.MONGODB_URI, opts);
         console.log('✅ ZENEX Database Connected to API Microservice! 🚀');
 
-        // 💥 AUTO-CLEANUP FIX: mnit_raw_logs ২ দিন (৪৮ ঘন্টা) পর অটো ডিলিট হয়ে যাবে 💥
         try {
             await mongoose.connection.collection('mnit_raw_logs').createIndex(
                 { "timestamp": 1 }, 
-                { expireAfterSeconds: 172800 } // 172800 seconds = 48 Hours
+                { expireAfterSeconds: 172800 } 
             );
-        } catch(e) { } // Index already exists error ignore
+        } catch(e) { } 
 
     } catch (error) {
         console.error('❌ Database Connection Failed:', error);
@@ -48,7 +47,7 @@ async function triggerBinanceAutoPay(user) {
 }
 
 // ==========================================
-// 🚀 1. GET NUMBER API (For Tool/API Users)
+// 🚀 1. GET NUMBER API
 // ==========================================
 fastify.post('/v1/getnum', async (request, reply) => {
     try {
@@ -61,6 +60,11 @@ fastify.post('/v1/getnum', async (request, reply) => {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 20000); 
 
+        let reqBody = request.body || {};
+        if (reqBody.range && !reqBody.number) {
+            reqBody.number = reqBody.range; 
+        }
+
         let response;
         try {
             response = await fetch("https://x.mnitnetwork.com/mapi/v1/public/getnum/number", {
@@ -72,7 +76,7 @@ fastify.post('/v1/getnum', async (request, reply) => {
                     "Accept": "application/json",
                     "Connection": "keep-alive"
                 },
-                body: JSON.stringify(request.body || {}),
+                body: JSON.stringify(reqBody),
                 signal: controller.signal
             });
             clearTimeout(timeoutId);
@@ -104,7 +108,7 @@ fastify.post('/v1/getnum', async (request, reply) => {
 });
 
 // ==========================================
-// ⚡ 2. BACKGROUND WORKER (ZERO CPU LOAD)
+// ⚡ 2. BACKGROUND WORKER (REAL MULTI-OTP ALLOWED)
 // ==========================================
 let isSyncing = false;
 
@@ -123,10 +127,7 @@ const syncMNITBackground = async () => {
                 headers: { 
                     "mapikey": REAL_API_KEY, 
                     "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; SM-G998B Build/SP1A.210812.016)", 
-                    "Accept": "application/json",
-                    "Connection": "keep-alive",
-                    "Cache-Control": "no-cache, no-store, must-revalidate",
-                    "Pragma": "no-cache"
+                    "Accept": "application/json"
                 },
                 signal: controller.signal
             });
@@ -144,88 +145,119 @@ const syncMNITBackground = async () => {
         else if (mnetData?.data && Array.isArray(mnetData.data)) liveOtps = mnetData.data;
 
         if (liveOtps.length > 0) {
-
-            // RAW LOG SAVE (BULK WRITE)
+            
+            // 💥 CRYSTAL CLEAR RAW LOG FIX
             try {
                 const bulkOps = liveOtps.filter(o => o.otp).map(otpItem => {
                     const mNum = String(otpItem.number || otpItem.phone || otpItem.full_number || "").replace(/\D/g, "");
                     return {
-                        updateOne: {
-                            filter: { "rawPayload.orderData.searchNumber": mNum, "rawPayload.apiResponse.otp": otpItem.otp },
-                            update: { $setOnInsert: { timestamp: new Date(), rawPayload: { orderData: { searchNumber: mNum }, apiResponse: otpItem } } },
-                            upsert: true
+                        insertOne: {
+                            document: {
+                                timestamp: new Date(),
+                                uniqueRawKey: `${otpItem.nid}_${Math.random()}`, 
+                                rawPayload: { orderData: { searchNumber: mNum }, apiResponse: otpItem }
+                            }
                         }
                     };
                 });
-                if (bulkOps.length > 0) {
-                    mongoose.connection.collection('mnit_raw_logs').bulkWrite(bulkOps, { ordered: false }).catch(()=>{});
-                }
+                if (bulkOps.length > 0) mongoose.connection.collection('mnit_raw_logs').bulkWrite(bulkOps, { ordered: false }).catch(()=>{});
             } catch(e) {}
             
+            // 💥 9-DIGIT COLLISION SHIELD
+            const otpGroups = {};
+            liveOtps.forEach(m => {
+                const mNum = String(m.number || m.phone || m.full_number || "").replace(/\D/g, "");
+                if (mNum.length >= 6) {
+                    const key = mNum.length > 9 ? mNum.slice(-9) : mNum;
+                    if (!otpGroups[key]) otpGroups[key] = [];
+                    otpGroups[key].push(m);
+                }
+            });
+
             const twentyFiveMinsAgo = new Date(Date.now() - 25 * 60 * 1000);
             const recentOrders = await Order.find({ 
                 status: { $in: ["WAIT", "DONE"] },
                 createdAt: { $gte: twentyFiveMinsAgo }
-            }).select("_id searchNumber userEmail fullMessage status").lean();
+            }).select("_id searchNumber userEmail fullMessage status processedKeys createdAt").lean();
 
             for (const order of recentOrders) {
                 if (!order.searchNumber) continue;
                 const cleanSearchNum = String(order.searchNumber).replace(/\D/g, "");
                 if (cleanSearchNum.length < 6) continue;
                 
-                const last6 = cleanSearchNum.slice(-6);
-                
-                const matchedOtpObj = liveOtps.find(m => {
-                    const mNum = String(m.number || m.phone || m.full_number || "").replace(/\D/g, "");
-                    return mNum.endsWith(last6);
-                });
+                const searchKey = cleanSearchNum.length > 9 ? cleanSearchNum.slice(-9) : cleanSearchNum;
+                const matchedOtps = otpGroups[searchKey]; 
 
-                if (matchedOtpObj) {
-                    const incomingMsg = (matchedOtpObj.otp || matchedOtpObj.code || matchedOtpObj.sms || matchedOtpObj.full_message || "").toString().trim();
-                    if (!incomingMsg || incomingMsg.toLowerCase() === "waiting..." || incomingMsg.toLowerCase() === "null") continue; 
+                if (matchedOtps && matchedOtps.length > 0) {
+                    for (const matchedOtpObj of matchedOtps) {
 
-                    let incomingCode = incomingMsg;
-                    const incomingMatch = incomingMsg.match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)/);
-                    if (incomingMatch) {
-                        incomingCode = incomingMatch[0]; 
-                    }
-                    if (!incomingCode) continue;
-
-                    const existingMsgs = order.fullMessage ? order.fullMessage.split(" _||_ ") : [];
-                    const alreadyExists = existingMsgs.some(msg => msg.includes(incomingCode));
-                    if (alreadyExists) continue;
-
-                    const user = await User.findOne({ email: order.userEmail }).lean();
-                    if (!user) continue;
-
-                    const isFreeService = incomingMsg.toLowerCase().includes("whatsapp") || incomingMsg.toLowerCase().includes("telegram") || incomingMsg.toLowerCase().includes("t.me");
-                    
-                    let otpCost = isFreeService ? 0 : (Number(user.otpRate) || 0.50);
-                    let otpCommission = 0; let agentId = null;
-
-                    if (!isFreeService && user.agentEmail) {
-                        const agent = await User.findOne({ $or: [{ email: user.agentEmail }, { customAgentMail: user.agentEmail }], role: "agent" }).lean();
-                        if (agent) {
-                            agentId = agent._id;
-                            otpCommission = Math.max(0, Number(((Number(agent.agentMaxRate) || 0.70) - otpCost).toFixed(2)));
+                        // 💥 GHOST OTP SHIELD
+                        const orderTime = new Date(order.createdAt).getTime(); 
+                        const otpTimeStr = matchedOtpObj.created_at;
+                        if (otpTimeStr) {
+                            const otpTime = new Date(otpTimeStr.replace(/-/g, '/')).getTime();
+                            if (otpTime < (orderTime - 60000)) continue; 
                         }
-                    }
 
-                    let regexStr = incomingCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                        const incomingMsgRaw = (matchedOtpObj.otp || matchedOtpObj.code || matchedOtpObj.sms || matchedOtpObj.full_message || "").toString().trim();
+                        const lowerMsg = incomingMsgRaw.toLowerCase();
+                        
+                        // 💥 ANTI-GARBAGE SHIELD
+                        if (!incomingMsgRaw || ["waiting...", "waiting", "pending", "null", "false"].includes(lowerMsg)) continue;
+                        if (!/\d/.test(incomingMsgRaw)) continue; 
+                        if (/^[a-zA-Z0-9]{11}$/.test(incomingMsgRaw.trim()) && !/\s/.test(incomingMsgRaw)) continue; 
 
-                    const updatedOrder = await Order.findOneAndUpdate(
-                        { _id: order._id, fullMessage: { $not: new RegExp(regexStr) } },
-                        { 
-                            $set: { status: "DONE", otp: incomingCode, fullMessage: order.fullMessage ? order.fullMessage + " _||_ " + incomingMsg : incomingMsg, expireAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) },
-                            $inc: { orderCost: otpCost, orderCommission: otpCommission }
-                        },
-                        { returnDocument: 'after' }
-                    );
+                        let incomingCode = incomingMsgRaw;
+                        const incomingMatch = incomingMsgRaw.match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)/);
+                        if (incomingMatch && incomingMatch[0]) {
+                            incomingCode = incomingMatch[0].trim(); 
+                        }
+                        if (!incomingCode || incomingCode.length < 3) continue; 
 
-                    if (updatedOrder && otpCost > 0) {
-                        const updatedUser = await User.findOneAndUpdate({ _id: user._id }, { $inc: { balance: otpCost } }, { returnDocument: 'after' });
-                        if (otpCommission > 0 && agentId) await User.updateOne({ _id: agentId }, { $inc: { agentEarning: otpCommission, balance: otpCommission } });
-                        if (updatedUser && updatedUser.autoPayEnabled && updatedUser.balance >= 100) triggerBinanceAutoPay(updatedUser).catch(() => {});
+                        // 💥 REAL MULTI-OTP ALLOWANCE (Code + Time + Country)
+                        const exactTime = matchedOtpObj.created_at || "NO_TIME";
+                        const exactCountry = matchedOtpObj.country || "Unknown";
+                        const uniqueProcessKey = `${incomingCode}_${exactTime}_${exactCountry}`;
+
+                        // Checks if this EXACT message from this specific time/country was processed
+                        if (order.processedKeys && order.processedKeys.includes(uniqueProcessKey)) continue; 
+
+                        const user = await User.findOne({ email: order.userEmail }).lean();
+                        if (!user) continue;
+
+                        const isFreeService = lowerMsg.includes("whatsapp") || lowerMsg.includes("telegram") || lowerMsg.includes("t.me");
+                        let otpCost = isFreeService ? 0 : (Number(user.otpRate) || 0.50);
+                        let otpCommission = 0; let agentId = null;
+
+                        if (!isFreeService && user.agentEmail) {
+                            const agent = await User.findOne({ $or: [{ email: user.agentEmail }, { customAgentMail: user.agentEmail }], role: "agent" }).lean();
+                            if (agent) {
+                                agentId = agent._id;
+                                otpCommission = Math.max(0, Number(((Number(agent.agentMaxRate) || 0.70) - otpCost).toFixed(2)));
+                            }
+                        }
+
+                        // Atomic Update
+                        const updatedOrder = await Order.findOneAndUpdate(
+                            { _id: order._id, processedKeys: { $ne: uniqueProcessKey } },
+                            { 
+                                $set: { 
+                                    status: "DONE", 
+                                    otp: incomingCode, 
+                                    fullMessage: order.fullMessage ? order.fullMessage + " _||_ " + incomingMsgRaw : incomingMsgRaw, 
+                                    expireAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) 
+                                },
+                                $inc: { orderCost: otpCost, orderCommission: otpCommission },
+                                $addToSet: { processedKeys: uniqueProcessKey } 
+                            },
+                            { returnDocument: 'after' }
+                        );
+
+                        if (updatedOrder && otpCost > 0) {
+                            const updatedUser = await User.findOneAndUpdate({ _id: user._id }, { $inc: { balance: otpCost } }, { returnDocument: 'after' });
+                            if (otpCommission > 0 && agentId) await User.updateOne({ _id: agentId }, { $inc: { agentEarning: otpCommission, balance: otpCommission } });
+                            if (updatedUser && updatedUser.autoPayEnabled && updatedUser.balance >= 100) triggerBinanceAutoPay(updatedUser).catch(() => {});
+                        }
                     }
                 }
             }
@@ -240,7 +272,7 @@ const syncMNITBackground = async () => {
 setInterval(syncMNITBackground, 5000);
 
 // ==========================================
-// ⚡ 3. OTP INFO API (For Tool/API Users)
+// ⚡ 3. OTP INFO API (BOT GLITCH 100% FIXED)
 // ==========================================
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
     try {
@@ -252,9 +284,10 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
 
         const twentyMinutesAgo = new Date(Date.now() - 20 * 60 * 1000);
         
+        // 💥 BOT BUG FIX: FETCH ONLY "DONE" STATUS
         const recentOrders = await Order.find({
             userEmail: user.email,
-            status: { $in: ["WAIT", "DONE"] },
+            status: "DONE", 
             updatedAt: { $gte: twentyMinutesAgo }
         })
         .select("_id displayNumber searchNumber otp fullMessage country operator updatedAt createdAt status")
@@ -266,22 +299,20 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
             const pad = (n) => n.toString().padStart(2, '0');
             const formattedDate = `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
             
-            let finalOtpText = "";
-            if (order.status === "DONE" && order.otp && order.otp.toLowerCase() !== "waiting...") {
-                finalOtpText = order.fullMessage || order.otp || "";
-            }
-
             return {
                 nid: "ZX_" + order._id.toString().substring(0, 10).toUpperCase(),
                 number: String(order.displayNumber || order.searchNumber || "").replace(/\D/g, ""),
-                otp: finalOtpText,
+                otp: order.otp || order.fullMessage || "", 
                 country: order.country || "Unknown",
                 operator: order.operator || "Any",
                 created_at: formattedDate
             };
         });
 
-        return reply.status(200).send({ meta: { status: "success", code: 200 }, data: { otps: databaseOtps } });
+        // 💥 EXTRA SECURITY: Removes empty OTPs
+        const validOtps = databaseOtps.filter(o => o.otp && o.otp.trim() !== "" && !["waiting...", "pending", "null"].includes(o.otp.toLowerCase()));
+
+        return reply.status(200).send({ meta: { status: "success", code: 200 }, data: { otps: validOtps } });
 
     } catch (error) { return reply.status(500).send({ meta: { status: "error" } }); }
 });
@@ -382,9 +413,6 @@ fastify.get('/v1/user/today-otps', async (request, reply) => {
     }
 });
 
-// ==========================================
-// 🚀 START SERVER
-// ==========================================
 const startServer = async () => {
     try {
         await connectDB();
