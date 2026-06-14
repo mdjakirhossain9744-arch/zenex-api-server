@@ -49,66 +49,72 @@ async function triggerBinanceAutoPay(user) {
 // ==========================================
 // 🚀 1. GET NUMBER API
 // ==========================================
-fastify.post('/v1/getnum', async (request, reply) => {
-    try {
-        const apiKey = request.headers['mapikey'];
-        if (!apiKey || apiKey.trim().length < 10) return reply.status(401).send({ meta: { status: "error" }, message: "Invalid API Key" });
-
-        const user = await User.findOne({ apiKey: apiKey.trim() }).lean();
-        if (!user || !user.isApiActive || user.status !== "active") return reply.status(403).send({ meta: { status: "error" }, message: "Unauthorized" });
-
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 20000); 
-
-        let reqBody = request.body || {};
-        if (reqBody.range && !reqBody.number) {
-            reqBody.number = reqBody.range; 
-        }
-
-        let response;
+fastify.route({
+    method: ['GET', 'POST'], 
+    url: '/v1/getnum',
+    handler: async (request, reply) => {
         try {
-            response = await fetch("https://x.mnitnetwork.com/mapi/v1/public/getnum/number", {
-                method: "POST",
-                headers: { 
-                    "mapikey": REAL_API_KEY, 
-                    "Content-Type": "application/json",
-                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; SM-G998B Build/SP1A.210812.016)", 
-                    "Accept": "application/json",
-                    "Connection": "keep-alive"
-                },
-                body: JSON.stringify(reqBody),
-                signal: controller.signal
-            });
-            clearTimeout(timeoutId);
-        } catch (fetchError) {
-            clearTimeout(timeoutId);
-            return reply.status(504).send({ meta: { status: "error" }, message: "Provider is slow. Try again." });
-        }
+            const apiKey = request.headers['mapikey'] || (request.query && request.query.mapikey);
+            if (!apiKey || apiKey.trim().length < 10) return reply.status(401).send({ meta: { status: "error" }, message: "Invalid API Key" });
 
-        const data = await response.json();
+            const user = await User.findOne({ apiKey: apiKey.trim() }).lean();
+            if (!user || !user.isApiActive || user.status !== "active") return reply.status(403).send({ meta: { status: "error" }, message: "Unauthorized" });
 
-        if (data.meta?.status === "success") {
-            const todayStr = getUTCDateString();
-            const newOrder = new Order({
-                userEmail: user.email,
-                searchNumber: data.data.full_number,
-                displayNumber: data.data.number || `+${data.data.full_number}`,
-                country: data.data.country || "Unknown",
-                operator: data.data.operator || "Any",
-                status: "WAIT",
-                dateString: todayStr,
-                expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
-            });
-            newOrder.save().catch(e => console.error("Order Save Error:", e));
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 20000); 
+
+            const reqData = request.body || request.query || {};
+            const mnitPayload = {
+                range: reqData.range || undefined,
+                is_national: reqData.is_national === true || reqData.is_national === "true",
+                remove_plus: reqData.remove_plus === true || reqData.remove_plus === "true"
+            };
+
+            let response;
+            try {
+                response = await fetch("https://x.mnitnetwork.com/mapi/v1/public/getnum/number", {
+                    method: "POST",
+                    headers: { 
+                        "mapikey": REAL_API_KEY, 
+                        "Content-Type": "application/json",
+                        "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; SM-G998B Build/SP1A.210812.016)", 
+                        "Accept": "application/json",
+                        "Connection": "keep-alive"
+                    },
+                    body: JSON.stringify(mnitPayload),
+                    signal: controller.signal
+                });
+                clearTimeout(timeoutId);
+            } catch (fetchError) {
+                clearTimeout(timeoutId);
+                return reply.status(504).send({ meta: { status: "error" }, message: "Provider is slow. Try again." });
+            }
+
+            const data = await response.json();
+
+            if (data.meta?.status === "success") {
+                const todayStr = getUTCDateString();
+                const newOrder = new Order({
+                    userEmail: user.email,
+                    searchNumber: data.data.full_number,
+                    displayNumber: data.data.number || `+${data.data.full_number}`,
+                    country: data.data.country || "Unknown",
+                    operator: data.data.operator || "Any",
+                    status: "WAIT",
+                    dateString: todayStr,
+                    expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
+                });
+                newOrder.save().catch(e => console.error("Order Save Error:", e));
+            }
+            return reply.status(response.status || 200).send(data);
+        } catch (error) {
+            return reply.status(500).send({ meta: { status: "error" }, message: "Server Error" });
         }
-        return reply.status(response.status || 200).send(data);
-    } catch (error) {
-        return reply.status(500).send({ meta: { status: "error" }, message: "Server Error" });
     }
 });
 
 // ==========================================
-// ⚡ 2. BACKGROUND WORKER (ANTI-SPAM & REAL MULTI-OTP)
+// ⚡ 2. BACKGROUND WORKER 
 // ==========================================
 let isSyncing = false;
 
@@ -146,31 +152,22 @@ const syncMNITBackground = async () => {
 
         if (liveOtps.length > 0) {
             
-            // 💥 SUPER FILTER RAW LOG FIX: Prevents 5-sec spam, but catches Ivory Coast vs PostPaid perfectly!
             try {
                 const bulkOps = liveOtps.filter(o => o.otp).map(otpItem => {
                     const mNum = String(otpItem.number || otpItem.phone || otpItem.full_number || "").replace(/\D/g, "");
-                    const exactOtpText = otpItem.otp || "";
-                    const exactTime = otpItem.created_at || "NO_TIME";
-                    const exactCountry = otpItem.country || "NO_COUNTRY";
-                    
                     return {
-                        updateOne: {
-                            filter: { 
-                                "rawPayload.orderData.searchNumber": mNum, 
-                                "rawPayload.apiResponse.otp": exactOtpText,
-                                "rawPayload.apiResponse.created_at": exactTime,
-                                "rawPayload.apiResponse.country": exactCountry
-                            }, 
-                            update: { $setOnInsert: { timestamp: new Date(), rawPayload: { orderData: { searchNumber: mNum }, apiResponse: otpItem } } },
-                            upsert: true
+                        insertOne: {
+                            document: {
+                                timestamp: new Date(),
+                                uniqueRawKey: `${otpItem.nid}_${Math.random()}`, 
+                                rawPayload: { orderData: { searchNumber: mNum }, apiResponse: otpItem }
+                            }
                         }
                     };
                 });
                 if (bulkOps.length > 0) mongoose.connection.collection('mnit_raw_logs').bulkWrite(bulkOps, { ordered: false }).catch(()=>{});
             } catch(e) {}
             
-            // 💥 9-DIGIT COLLISION SHIELD
             const otpGroups = {};
             liveOtps.forEach(m => {
                 const mNum = String(m.number || m.phone || m.full_number || "").replace(/\D/g, "");
@@ -198,7 +195,6 @@ const syncMNITBackground = async () => {
                 if (matchedOtps && matchedOtps.length > 0) {
                     for (const matchedOtpObj of matchedOtps) {
 
-                        // GHOST OTP SHIELD
                         const orderTime = new Date(order.createdAt).getTime(); 
                         const otpTimeStr = matchedOtpObj.created_at;
                         if (otpTimeStr) {
@@ -209,7 +205,6 @@ const syncMNITBackground = async () => {
                         const incomingMsgRaw = (matchedOtpObj.otp || matchedOtpObj.code || matchedOtpObj.sms || matchedOtpObj.full_message || "").toString().trim();
                         const lowerMsg = incomingMsgRaw.toLowerCase();
                         
-                        // ANTI-GARBAGE SHIELD
                         if (!incomingMsgRaw || ["waiting...", "waiting", "pending", "null", "false"].includes(lowerMsg)) continue;
                         if (!/\d/.test(incomingMsgRaw)) continue; 
                         if (/^[a-zA-Z0-9]{11}$/.test(incomingMsgRaw.trim()) && !/\s/.test(incomingMsgRaw)) continue; 
@@ -221,7 +216,6 @@ const syncMNITBackground = async () => {
                         }
                         if (!incomingCode || incomingCode.length < 3) continue; 
 
-                        // 💥 REAL MULTI-OTP KEY (Code + Time + Country)
                         const exactTime = matchedOtpObj.created_at || "NO_TIME";
                         const exactCountry = matchedOtpObj.country || "Unknown";
                         const uniqueProcessKey = `${incomingCode}_${exactTime}_${exactCountry}`;
@@ -243,7 +237,6 @@ const syncMNITBackground = async () => {
                             }
                         }
 
-                        // Atomic Update
                         const updatedOrder = await Order.findOneAndUpdate(
                             { _id: order._id, processedKeys: { $ne: uniqueProcessKey } },
                             { 
@@ -278,7 +271,7 @@ const syncMNITBackground = async () => {
 setInterval(syncMNITBackground, 5000);
 
 // ==========================================
-// ⚡ 3. OTP INFO API
+// ⚡ 3. OTP INFO API (💥 FULL MESSAGE RESTORED FOR BOTS)
 // ==========================================
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
     try {
@@ -309,17 +302,14 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
             const numberClean = String(order.displayNumber || order.searchNumber || "").replace(/\D/g, "");
             const baseNid = "ZX_" + order._id.toString().substring(0, 10).toUpperCase();
 
+            // 💥 FULL MESSAGE RESTORED 💥
             if (order.fullMessage && order.fullMessage.includes("_||_")) {
                 const msgsArray = order.fullMessage.split("_||_").map(m => m.trim()).filter(Boolean);
                 msgsArray.forEach((msg, idx) => {
-                    let extractedCode = msg;
-                    const match = msg.match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)/);
-                    if (match) extractedCode = match[0].trim();
-
                     expandedOtps.push({
                         nid: `${baseNid}_${idx}`, 
                         number: numberClean,
-                        otp: extractedCode, 
+                        otp: msg, // Sending the complete original message
                         country: order.country || "Unknown",
                         operator: order.operator || "Any",
                         created_at: formattedDate
@@ -329,7 +319,7 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
                 expandedOtps.push({
                     nid: baseNid,
                     number: numberClean,
-                    otp: order.otp || order.fullMessage || "", 
+                    otp: order.fullMessage || order.otp || "", // Sending the complete original message
                     country: order.country || "Unknown",
                     operator: order.operator || "Any",
                     created_at: formattedDate
