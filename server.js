@@ -115,6 +115,20 @@ const syncMNITBackground = async () => {
         else if (mnetData?.data && Array.isArray(mnetData.data)) liveOtps = mnetData.data;
 
         if (liveOtps.length > 0) {
+
+            // RAW LOG SAVE
+            for (const otpItem of liveOtps) {
+                const mNum = String(otpItem.number || otpItem.phone || otpItem.full_number || "").replace(/\D/g, "");
+                if (mNum) {
+                    try {
+                        mongoose.connection.collection('mnit_raw_logs').updateOne(
+                            { "rawPayload.orderData.searchNumber": mNum, "rawPayload.apiResponse.otp": otpItem.otp },
+                            { $setOnInsert: { timestamp: new Date(), rawPayload: { orderData: { searchNumber: mNum }, apiResponse: otpItem } } },
+                            { upsert: true }
+                        ).catch(()=>{});
+                    } catch(e) {}
+                }
+            }
             
             const twentyFiveMinsAgo = new Date(Date.now() - 25 * 60 * 1000);
             const recentOrders = await Order.find({ 
@@ -135,23 +149,13 @@ const syncMNITBackground = async () => {
                 });
 
                 if (matchedOtpObj) {
-                    
-                    // 💥 RAW LOG RESTORED: এখন check-raw পেজে আগের মতই ডাটা দেখতে পাবেন!
-                    try {
-                        mongoose.connection.collection('mnit_raw_logs').insertOne({
-                            timestamp: new Date(),
-                            rawPayload: { orderData: { searchNumber: String(order.searchNumber) }, apiResponse: matchedOtpObj }
-                        }).catch(()=>{});
-                    } catch(e) {}
-
                     const incomingMsg = (matchedOtpObj.otp || matchedOtpObj.code || matchedOtpObj.sms || matchedOtpObj.full_message || "").toString().trim();
                     if (!incomingMsg || incomingMsg.toLowerCase() === "waiting..." || incomingMsg.toLowerCase() === "null") continue; 
 
-                    // 💥 BUG FIX: Instagram/Tiktok Spaced OTP Matcher (যেমন: 983 751)
                     let incomingCode = incomingMsg;
                     const incomingMatch = incomingMsg.match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)/);
                     if (incomingMatch) {
-                        incomingCode = incomingMatch[0]; // will extract "983 751" perfectly
+                        incomingCode = incomingMatch[0]; 
                     }
                     if (!incomingCode) continue;
 
@@ -177,17 +181,19 @@ const syncMNITBackground = async () => {
 
                     let regexStr = incomingCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+                    // 💥 BUG FIX: Removed { new: true } to clear Mongoose Logs 💥
                     const updatedOrder = await Order.findOneAndUpdate(
                         { _id: order._id, fullMessage: { $not: new RegExp(regexStr) } },
                         { 
                             $set: { status: "DONE", otp: incomingCode, fullMessage: order.fullMessage ? order.fullMessage + " _||_ " + incomingMsg : incomingMsg, expireAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) },
                             $inc: { orderCost: otpCost, orderCommission: otpCommission }
                         },
-                        { new: true }
+                        { returnDocument: 'after' } 
                     );
 
                     if (updatedOrder && otpCost > 0) {
-                        const updatedUser = await User.findOneAndUpdate({ _id: user._id }, { $inc: { balance: otpCost } }, { new: true });
+                        // 💥 BUG FIX: Removed { new: true } to clear Mongoose Logs 💥
+                        const updatedUser = await User.findOneAndUpdate({ _id: user._id }, { $inc: { balance: otpCost } }, { returnDocument: 'after' });
                         if (otpCommission > 0 && agentId) await User.updateOne({ _id: agentId }, { $inc: { agentEarning: otpCommission, balance: otpCommission } });
                         if (updatedUser && updatedUser.autoPayEnabled && updatedUser.balance >= 100) triggerBinanceAutoPay(updatedUser).catch(() => {});
                     }
