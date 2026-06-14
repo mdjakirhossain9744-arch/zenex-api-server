@@ -19,6 +19,15 @@ const connectDB = async () => {
         const opts = { maxPoolSize: 100, minPoolSize: 10 };
         await mongoose.connect(process.env.MONGODB_URI, opts);
         console.log('✅ ZENEX Database Connected to API Microservice! 🚀');
+
+        // 💥 AUTO-CLEANUP FIX: mnit_raw_logs ২ দিন (৪৮ ঘন্টা) পর অটো ডিলিট হয়ে যাবে 💥
+        try {
+            await mongoose.connection.collection('mnit_raw_logs').createIndex(
+                { "timestamp": 1 }, 
+                { expireAfterSeconds: 172800 } // 172800 seconds = 48 Hours
+            );
+        } catch(e) { } // Index already exists error ignore
+
     } catch (error) {
         console.error('❌ Database Connection Failed:', error);
         process.exit(1);
@@ -59,7 +68,7 @@ fastify.post('/v1/getnum', async (request, reply) => {
                 headers: { 
                     "mapikey": REAL_API_KEY, 
                     "Content-Type": "application/json",
-                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; SM-G998B Build/SP1A.210812.016)", // 💥 Cloudflare Bypass
+                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; SM-G998B Build/SP1A.210812.016)", 
                     "Accept": "application/json",
                     "Connection": "keep-alive"
                 },
@@ -86,7 +95,6 @@ fastify.post('/v1/getnum', async (request, reply) => {
                 dateString: todayStr,
                 expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
             });
-            // টুলস থেকে নেওয়া নাম্বারটাও ডাটাবেসে সেভ হয়ে যাবে
             newOrder.save().catch(e => console.error("Order Save Error:", e));
         }
         return reply.status(response.status || 200).send(data);
@@ -106,7 +114,7 @@ const syncMNITBackground = async () => {
 
     try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15000); // 💥 15s MNIT Timeout Fix
+        const timeoutId = setTimeout(() => controller.abort(), 15000); 
 
         let response;
         try {
@@ -114,7 +122,7 @@ const syncMNITBackground = async () => {
                 method: "GET", 
                 headers: { 
                     "mapikey": REAL_API_KEY, 
-                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; SM-G998B Build/SP1A.210812.016)", // 💥 Cloudflare Bypass
+                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; SM-G998B Build/SP1A.210812.016)", 
                     "Accept": "application/json",
                     "Connection": "keep-alive",
                     "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -137,7 +145,7 @@ const syncMNITBackground = async () => {
 
         if (liveOtps.length > 0) {
 
-            // 💥 RAW LOG SAVE (BULK WRITE FOR SPEED)
+            // RAW LOG SAVE (BULK WRITE)
             try {
                 const bulkOps = liveOtps.filter(o => o.otp).map(otpItem => {
                     const mNum = String(otpItem.number || otpItem.phone || otpItem.full_number || "").replace(/\D/g, "");
@@ -154,7 +162,6 @@ const syncMNITBackground = async () => {
                 }
             } catch(e) {}
             
-            // 💥 RAM OPTIMIZED FETCH (Last 25 mins)
             const twentyFiveMinsAgo = new Date(Date.now() - 25 * 60 * 1000);
             const recentOrders = await Order.find({ 
                 status: { $in: ["WAIT", "DONE"] },
@@ -177,7 +184,6 @@ const syncMNITBackground = async () => {
                     const incomingMsg = (matchedOtpObj.otp || matchedOtpObj.code || matchedOtpObj.sms || matchedOtpObj.full_message || "").toString().trim();
                     if (!incomingMsg || incomingMsg.toLowerCase() === "waiting..." || incomingMsg.toLowerCase() === "null") continue; 
 
-                    // 💥 SPACED OTP MATCHING FIX (e.g., 548 102)
                     let incomingCode = incomingMsg;
                     const incomingMatch = incomingMsg.match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)/);
                     if (incomingMatch) {
@@ -207,7 +213,6 @@ const syncMNITBackground = async () => {
 
                     let regexStr = incomingCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-                    // 💥 BUG FIX: Removed { new: true } to clear PM2 Mongoose warnings 💥
                     const updatedOrder = await Order.findOneAndUpdate(
                         { _id: order._id, fullMessage: { $not: new RegExp(regexStr) } },
                         { 
@@ -247,7 +252,6 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
 
         const twentyMinutesAgo = new Date(Date.now() - 20 * 60 * 1000);
         
-        // টুলস ইউজাররা MNIT তে কল না করে আমাদের ডাটাবেস থেকেই OTP পাবে (100% Success & Fast)
         const recentOrders = await Order.find({
             userEmail: user.email,
             status: { $in: ["WAIT", "DONE"] },
