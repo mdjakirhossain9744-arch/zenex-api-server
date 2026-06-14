@@ -105,7 +105,7 @@ fastify.post('/v1/getnum', async (request, reply) => {
 let isSyncing = false;
 
 const syncMNITBackground = async () => {
-    if (isSyncing) return; // Prevent overlapping syncs
+    if (isSyncing) return; 
     isSyncing = true;
 
     try {
@@ -136,7 +136,6 @@ const syncMNITBackground = async () => {
         if (liveOtps.length > 0) {
             const liveNumbers = liveOtps.map(o => String(o.number).replace(/\D/g, ""));
             
-            // Find WAIT orders that match the live numbers
             const matchedOrders = await Order.find({
                 status: { $in: ["WAIT", "DONE"] },
                 $expr: {
@@ -154,8 +153,18 @@ const syncMNITBackground = async () => {
 
                 if (matchedOtpObj) {
                     const incomingMsg = (matchedOtpObj.otp || "").trim();
+
+                    // 💥 BULLETPROOF FIX: যদি মেসেজ ফাঁকা হয় বা "Waiting..." থাকে, তাহলে এখানেই রিজেক্ট করে দেবে!
+                    if (!incomingMsg || incomingMsg.toLowerCase() === "waiting..." || incomingMsg.toLowerCase() === "null") {
+                        continue; 
+                    }
+
                     const incomingMatch = incomingMsg.match(/\b\d{4,8}\b/);
                     const incomingCode = incomingMatch ? incomingMatch[0] : incomingMsg;
+
+                    // 💥 EXTRA SECURITY: কোড ফাঁকা হলেও রিজেক্ট করবে।
+                    if (!incomingCode) continue;
+
                     const existingMsgs = order.fullMessage ? order.fullMessage.split(" _||_ ") : [];
                     const alreadyExists = existingMsgs.some(msg => {
                         const match = msg.match(/\b\d{4,8}\b/);
@@ -228,7 +237,6 @@ const syncMNITBackground = async () => {
     }
 };
 
-// Start the background worker (Runs every 3 seconds)
 setInterval(syncMNITBackground, 3000);
 
 
@@ -242,13 +250,11 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
             return reply.status(401).send({ meta: { status: "error" }, message: "Missing API Key" });
         }
 
-        // We use select() to make the query incredibly fast and use less RAM
         const user = await User.findOne({ apiKey: apiKey.trim() }).select("email isApiActive").lean();
         if (!user || !user.isApiActive) {
             return reply.status(401).send({ meta: { status: "error" }, message: "Unauthorized" });
         }
 
-        // Fetch User's Orders from the last 20 minutes directly from MongoDB (Blazing Fast)
         const twentyMinutesAgo = new Date(Date.now() - 20 * 60 * 1000);
         
         const recentOrders = await Order.find({
@@ -257,14 +263,14 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
             updatedAt: { $gte: twentyMinutesAgo }
         }).sort({ updatedAt: -1 }).lean();
 
-        // Format exactly like MNIT so third-party tools don't break
         const databaseOtps = recentOrders.map(order => {
             const d = new Date(order.updatedAt || order.createdAt);
             const pad = (n) => n.toString().padStart(2, '0');
             const formattedDate = `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
             
             let finalOtpText = "";
-            if (order.status === "DONE") {
+            // 💥 BULLETPROOF FIX: বট যেন ভুল করেও ফাঁকা OTP না পায় তার ডাবল চেকিং!
+            if (order.status === "DONE" && order.otp && order.otp.toLowerCase() !== "waiting...") {
                 finalOtpText = order.fullMessage || order.otp || "";
             }
 
@@ -278,7 +284,6 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
             };
         });
 
-        // Instantly return without doing any heavy MNIT sync
         return reply.status(200).send({
             meta: { status: "success", code: 200 },
             data: { otps: databaseOtps }
