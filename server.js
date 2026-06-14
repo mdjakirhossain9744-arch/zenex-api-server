@@ -38,9 +38,6 @@ async function triggerBinanceAutoPay(user) {
     } catch (e) {}
 }
 
-// ==========================================
-// 🚀 1. GET NUMBER API
-// ==========================================
 fastify.post('/v1/getnum', async (request, reply) => {
     try {
         const apiKey = request.headers['mapikey'];
@@ -88,9 +85,6 @@ fastify.post('/v1/getnum', async (request, reply) => {
     }
 });
 
-// ==========================================
-// ⚡ 2. BACKGROUND WORKER (ZERO CPU LOAD)
-// ==========================================
 let isSyncing = false;
 
 const syncMNITBackground = async () => {
@@ -99,7 +93,7 @@ const syncMNITBackground = async () => {
 
     try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15000); // 💥 MNIT 15s Timeout Fix
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
 
         let response;
         try {
@@ -122,14 +116,11 @@ const syncMNITBackground = async () => {
 
         if (liveOtps.length > 0) {
             
-            // 💥 RAM OPTIMIZATION & INFINITE SCALING
             const twentyFiveMinsAgo = new Date(Date.now() - 25 * 60 * 1000);
             const recentOrders = await Order.find({ 
                 status: { $in: ["WAIT", "DONE"] },
                 createdAt: { $gte: twentyFiveMinsAgo }
-            })
-            .select("_id searchNumber userEmail fullMessage status") // 💥 Only fetches required fields to save RAM
-            .lean();
+            }).select("_id searchNumber userEmail fullMessage status").lean();
 
             for (const order of recentOrders) {
                 if (!order.searchNumber) continue;
@@ -144,11 +135,24 @@ const syncMNITBackground = async () => {
                 });
 
                 if (matchedOtpObj) {
-                    const incomingMsg = (matchedOtpObj.otp || matchedOtpObj.code || matchedOtpObj.sms || "").toString().trim();
+                    
+                    // 💥 RAW LOG RESTORED: এখন check-raw পেজে আগের মতই ডাটা দেখতে পাবেন!
+                    try {
+                        mongoose.connection.collection('mnit_raw_logs').insertOne({
+                            timestamp: new Date(),
+                            rawPayload: { orderData: { searchNumber: String(order.searchNumber) }, apiResponse: matchedOtpObj }
+                        }).catch(()=>{});
+                    } catch(e) {}
+
+                    const incomingMsg = (matchedOtpObj.otp || matchedOtpObj.code || matchedOtpObj.sms || matchedOtpObj.full_message || "").toString().trim();
                     if (!incomingMsg || incomingMsg.toLowerCase() === "waiting..." || incomingMsg.toLowerCase() === "null") continue; 
 
-                    const incomingMatch = incomingMsg.match(/\b\d{4,8}\b/);
-                    const incomingCode = incomingMatch ? incomingMatch[0] : incomingMsg;
+                    // 💥 BUG FIX: Instagram/Tiktok Spaced OTP Matcher (যেমন: 983 751)
+                    let incomingCode = incomingMsg;
+                    const incomingMatch = incomingMsg.match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)/);
+                    if (incomingMatch) {
+                        incomingCode = incomingMatch[0]; // will extract "983 751" perfectly
+                    }
                     if (!incomingCode) continue;
 
                     const existingMsgs = order.fullMessage ? order.fullMessage.split(" _||_ ") : [];
@@ -171,7 +175,7 @@ const syncMNITBackground = async () => {
                         }
                     }
 
-                    let regexStr = /^\d+$/.test(incomingCode) ? `\\b${incomingCode}\\b` : incomingCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    let regexStr = incomingCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
                     const updatedOrder = await Order.findOneAndUpdate(
                         { _id: order._id, fullMessage: { $not: new RegExp(regexStr) } },
@@ -199,9 +203,6 @@ const syncMNITBackground = async () => {
 
 setInterval(syncMNITBackground, 5000);
 
-// ==========================================
-// ⚡ 3. OTP INFO API (FOR DEVELOPERS)
-// ==========================================
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
     try {
         const apiKey = request.headers['mapikey'];
@@ -217,7 +218,7 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
             status: { $in: ["WAIT", "DONE"] },
             updatedAt: { $gte: twentyMinutesAgo }
         })
-        .select("_id displayNumber searchNumber otp fullMessage country operator updatedAt createdAt status") // 💥 Selective Fetch for API Output
+        .select("_id displayNumber searchNumber otp fullMessage country operator updatedAt createdAt status")
         .sort({ updatedAt: -1 })
         .lean();
 
@@ -246,9 +247,6 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
     } catch (error) { return reply.status(500).send({ meta: { status: "error" } }); }
 });
 
-// ==========================================
-// 🌍 4. ACTIVE RANGES API
-// ==========================================
 const extractServiceName = (msg) => {
     if (!msg) return "Other";
     const lowerMsg = msg.toLowerCase();
@@ -314,9 +312,6 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
     }
 });
 
-// ==========================================
-// 📋 5. TODAY OTPs API 
-// ==========================================
 fastify.get('/v1/user/today-otps', async (request, reply) => {
     try {
         const apiKey = request.headers['mapikey'];
@@ -342,15 +337,11 @@ fastify.get('/v1/user/today-otps', async (request, reply) => {
     }
 });
 
-// ==========================================
-// 🚀 START SERVER
-// ==========================================
 const startServer = async () => {
     try {
         await connectDB();
-        const PORT = process.env.PORT || 4000;
-        await fastify.listen({ port: PORT, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice is LIVE at: http://localhost:${PORT}`);
+        await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
+        console.log(`⚡ ZENEX Microservice is LIVE at: http://localhost:${process.env.PORT || 4000}`);
     } catch (err) {
         console.error(err);
         process.exit(1);
