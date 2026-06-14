@@ -16,8 +16,9 @@ fastify.register(import('@fastify/cors'), {
 
 const connectDB = async () => {
     try {
-        await mongoose.connect(process.env.MONGODB_URI, { maxPoolSize: 100, minPoolSize: 10 });
-        console.log('✅ ZENEX Database Connected to Microservice! 🚀');
+        const opts = { maxPoolSize: 100, minPoolSize: 10 };
+        await mongoose.connect(process.env.MONGODB_URI, opts);
+        console.log('✅ ZENEX Database Connected to API Microservice! 🚀');
     } catch (error) {
         console.error('❌ Database Connection Failed:', error);
         process.exit(1);
@@ -27,8 +28,18 @@ const connectDB = async () => {
 const getUTCDateString = (dateObj = new Date()) => new Date(dateObj).toISOString().split('T')[0];
 const REAL_API_KEY = "M_7VX25KAJI";
 
+async function triggerBinanceAutoPay(user) {
+    try {
+        await fetch(`${process.env.MAIN_SITE_URL}/api/cron/process-binance-payout`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId: user._id })
+        });
+    } catch (e) {}
+}
+
 // ==========================================
-// 🚀 1. GET NUMBER API (Direct Tunnel)
+// 🚀 1. GET NUMBER API
 // ==========================================
 fastify.post('/v1/getnum', async (request, reply) => {
     try {
@@ -89,58 +100,44 @@ fastify.post('/v1/getnum', async (request, reply) => {
 });
 
 // ==========================================
-// ⚡ 2. OTP INFO API (0ms Response Tunnel - DATABASE BACKED)
+// ⚡ 2. BACKGROUND WORKER (Runs Independently every 3 seconds - ZERO CPU LOAD)
 // ==========================================
-fastify.get('/v1/numsuccess/info', async (request, reply) => {
+let isSyncing = false;
+
+const syncMNITBackground = async () => {
+    if (isSyncing) return; // Prevent overlapping syncs
+    isSyncing = true;
+
     try {
-        const apiKey = request.headers['mapikey'];
-        if (!apiKey || apiKey.trim().length < 10) {
-            return reply.status(401).send({ meta: { status: "error" }, message: "Missing API Key" });
-        }
-
-        const user = await User.findOne({ apiKey: apiKey.trim() }).lean();
-        if (!user || !user.isApiActive) {
-            return reply.status(401).send({ meta: { status: "error" }, message: "Unauthorized" });
-        }
-
         const now = Date.now();
-        let mnetData = null;
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 6000);
+        const timeoutId = setTimeout(() => controller.abort(), 4000);
 
+        let response;
         try {
-            const response = await fetch(`https://x.mnitnetwork.com/mapi/v1/public/numsuccess/info?t=${now}`, {
+            response = await fetch(`https://x.mnitnetwork.com/mapi/v1/public/numsuccess/info?t=${now}`, {
                 method: "GET",
-                headers: {
-                    "mapikey": REAL_API_KEY,
-                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12)",
-                    "Connection": "keep-alive"
-                },
+                headers: { "mapikey": REAL_API_KEY, "Connection": "keep-alive" },
                 signal: controller.signal
             });
             clearTimeout(timeoutId);
-
-            if (response.ok) {
-                mnetData = await response.json();
-            } else {
-                // Not returning error right away, we will still serve DB data below
-                console.log("MNIT response not OK in sync");
-            }
-        } catch (fetchError) {
+        } catch (e) {
             clearTimeout(timeoutId);
-            // Not returning timeout error right away, serve DB data below
-            console.log("MNIT Timeout in sync");
+            isSyncing = false;
+            return;
         }
 
-        // --- 🔴 START OF MNIT SYNC LOGIC (Unchanged existing Logic) 🔴 ---
+        if (!response.ok) { isSyncing = false; return; }
+        
+        const mnetData = await response.json();
         const rawOtps = mnetData?.data?.otps;
         const liveOtps = Array.isArray(rawOtps) ? rawOtps : [];
 
         if (liveOtps.length > 0) {
             const liveNumbers = liveOtps.map(o => String(o.number).replace(/\D/g, ""));
             
+            // Find WAIT orders that match the live numbers
             const matchedOrders = await Order.find({
-                userEmail: user.email,
                 status: { $in: ["WAIT", "DONE"] },
                 $expr: {
                     $in: [
@@ -167,6 +164,9 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
                     });
 
                     if (alreadyExists) continue;
+
+                    const user = await User.findOne({ email: order.userEmail }).lean();
+                    if (!user) continue;
 
                     const isFreeService = incomingMsg.toLowerCase().includes("whatsapp") || incomingMsg.toLowerCase().includes("telegram") || incomingMsg.toLowerCase().includes("t.me");
                     
@@ -221,11 +221,34 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
                 }
             }
         }
-        // --- 🔴 END OF MNIT SYNC LOGIC 🔴 ---
+    } catch (error) {
+        console.error("Background Sync Error:", error.message);
+    } finally {
+        isSyncing = false;
+    }
+};
+
+// Start the background worker (Runs every 3 seconds)
+setInterval(syncMNITBackground, 3000);
 
 
-        // --- 🟢 NEW: FETCH FROM OUR MONGODB SINGLE SOURCE OF TRUTH 🟢 ---
-        // Fetch User's Orders from the last 20 minutes (using updatedAt)
+// ==========================================
+// ⚡ 3. OTP INFO API (0 CPU Load - Just a DB Read)
+// ==========================================
+fastify.get('/v1/numsuccess/info', async (request, reply) => {
+    try {
+        const apiKey = request.headers['mapikey'];
+        if (!apiKey || apiKey.trim().length < 10) {
+            return reply.status(401).send({ meta: { status: "error" }, message: "Missing API Key" });
+        }
+
+        // We use select() to make the query incredibly fast and use less RAM
+        const user = await User.findOne({ apiKey: apiKey.trim() }).select("email isApiActive").lean();
+        if (!user || !user.isApiActive) {
+            return reply.status(401).send({ meta: { status: "error" }, message: "Unauthorized" });
+        }
+
+        // Fetch User's Orders from the last 20 minutes directly from MongoDB (Blazing Fast)
         const twentyMinutesAgo = new Date(Date.now() - 20 * 60 * 1000);
         
         const recentOrders = await Order.find({
@@ -236,12 +259,10 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
 
         // Format exactly like MNIT so third-party tools don't break
         const databaseOtps = recentOrders.map(order => {
-            // Formatting Date to "YYYY-MM-DD HH:mm:ss"
             const d = new Date(order.updatedAt || order.createdAt);
             const pad = (n) => n.toString().padStart(2, '0');
             const formattedDate = `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
             
-            // Reconstruct the message exactly as MNIT sends it
             let finalOtpText = "";
             if (order.status === "DONE") {
                 finalOtpText = order.fullMessage || order.otp || "";
@@ -257,9 +278,9 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
             };
         });
 
-        // 🚀 ALWAYS RETURN MONGODB DATA (No dropped OTPs anymore!)
+        // Instantly return without doing any heavy MNIT sync
         return reply.status(200).send({
-            meta: mnetData?.meta || { status: "success", code: 200 },
+            meta: { status: "success", code: 200 },
             data: { otps: databaseOtps }
         });
 
@@ -268,19 +289,9 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
     }
 });
 
-async function triggerBinanceAutoPay(user) {
-    try {
-        await fetch(`${process.env.MAIN_SITE_URL}/api/cron/process-binance-payout`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ userId: user._id })
-        });
-    } catch (e) {}
-}
-
 
 // ==========================================
-// 🌍 3. ACTIVE RANGES API (With 60s RAM Cache)
+// 🌍 4. ACTIVE RANGES API
 // ==========================================
 const extractServiceName = (msg) => {
     if (!msg) return "Other";
@@ -290,16 +301,7 @@ const extractServiceName = (msg) => {
     if (lowerMsg.includes('telegram') || lowerMsg.includes(' tg ')) return 'Telegram';
     if (lowerMsg.includes('instagram') || lowerMsg.includes(' ig ')) return 'Instagram';
     if (lowerMsg.includes('google') || /g-\d+/.test(lowerMsg) || lowerMsg.includes('gmail')) return 'Google';
-    if (lowerMsg.includes('microsoft') || lowerMsg.includes('outlook')) return 'Microsoft';
     if (lowerMsg.includes('tiktok') || lowerMsg.includes(' tt ')) return 'TikTok';
-    if (lowerMsg.includes('apple') || lowerMsg.includes(' ap ')) return 'Apple';
-    if (lowerMsg.includes('paypal')) return 'PayPal';
-    if (lowerMsg.includes('amazon')) return 'Amazon';
-    if (lowerMsg.includes('1xbet')) return '1xBet';
-    if (lowerMsg.includes('coinw')) return 'CoinW';
-    if (lowerMsg.includes('binance')) return 'Binance';
-    if (lowerMsg.includes('netflix')) return 'Netflix';
-    if (lowerMsg.includes('twitter') || lowerMsg.includes(' x ')) return 'Twitter/X';
     return "Other";
 };
 
@@ -309,29 +311,8 @@ const CACHE_DURATION = 60 * 1000;
 
 fastify.get('/v1/active-ranges', async (request, reply) => {
     try {
-        const mapikey = request.headers['mapikey'];
-        if (!mapikey) {
-            return reply.status(401).send({ success: false, message: "Missing mapikey header" });
-        }
-
-        if (mapikey !== REAL_API_KEY) {
-            const validUser = await User.findOne({ 
-                $or: [
-                    { secretKey: mapikey },
-                    { apiKey: mapikey },
-                    { apikey: mapikey },
-                    { api_key: mapikey },
-                    { mapikey: mapikey }
-                ]
-            }).select("_id").lean();
-
-            if (!validUser) { 
-                return reply.status(401).send({ success: false, message: "Unauthorized API Key" });
-            }
-        }
-
         if (cachedActiveData && (Date.now() - lastFetchTime < CACHE_DURATION)) {
-            return reply.send({ success: true, cached: true, message: "Live ranges fetched", data: cachedActiveData });
+            return reply.send({ success: true, cached: true, data: cachedActiveData });
         }
 
         const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
@@ -367,15 +348,11 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
             }
         });
 
-        const formattedRanges = Object.values(rangeMap)
-            .sort((a, b) => b.hits - a.hits)
-            .slice(0, 10);
-
+        const formattedRanges = Object.values(rangeMap).sort((a, b) => b.hits - a.hits).slice(0, 10);
         cachedActiveData = { active_ranges: formattedRanges };
         lastFetchTime = Date.now();
 
-        return reply.send({ success: true, cached: false, message: "Live ranges fetched", data: cachedActiveData });
-
+        return reply.send({ success: true, cached: false, data: cachedActiveData });
     } catch (error) {
         return reply.status(500).send({ success: false, message: "Server Error" });
     }
@@ -383,7 +360,7 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
 
 
 // ==========================================
-// 📋 4. TODAY OTPs API (Zero-Load Text Response)
+// 📋 5. TODAY OTPs API 
 // ==========================================
 fastify.get('/v1/user/today-otps', async (request, reply) => {
     try {
@@ -394,22 +371,15 @@ fastify.get('/v1/user/today-otps', async (request, reply) => {
         if (!user) return reply.status(401).send({ error: "Invalid API Key" });
 
         const todayStr = getUTCDateString();
-        
         const orders = await Order.find({
             userEmail: user.email,
             dateString: todayStr,
             status: "DONE"
         }).select("displayNumber otp -_id").lean();
 
-        if (orders.length === 0) {
-            return reply.type('text/plain').send("NO_DATA");
-        }
+        if (orders.length === 0) return reply.type('text/plain').send("NO_DATA");
 
-        const textData = orders.map((o) => {
-            const cleanNum = String(o.displayNumber).replace(/\D/g, "");
-            return `${cleanNum}|${o.otp}`;
-        }).join('\n');
-
+        const textData = orders.map((o) => `${String(o.displayNumber).replace(/\D/g, "")}|${o.otp}`).join('\n');
         return reply.type('text/plain').send(textData);
 
     } catch (error) {
