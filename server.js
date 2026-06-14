@@ -38,6 +38,9 @@ async function triggerBinanceAutoPay(user) {
     } catch (e) {}
 }
 
+// ==========================================
+// 🚀 1. GET NUMBER API (For Tool/API Users)
+// ==========================================
 fastify.post('/v1/getnum', async (request, reply) => {
     try {
         const apiKey = request.headers['mapikey'];
@@ -53,11 +56,10 @@ fastify.post('/v1/getnum', async (request, reply) => {
         try {
             response = await fetch("https://x.mnitnetwork.com/mapi/v1/public/getnum/number", {
                 method: "POST",
-                // 💥 THE MAGIC BYPASS HEADERS RESTORED 💥
                 headers: { 
                     "mapikey": REAL_API_KEY, 
                     "Content-Type": "application/json",
-                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; SM-G998B Build/SP1A.210812.016)",
+                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; SM-G998B Build/SP1A.210812.016)", // 💥 Cloudflare Bypass
                     "Accept": "application/json",
                     "Connection": "keep-alive"
                 },
@@ -84,6 +86,7 @@ fastify.post('/v1/getnum', async (request, reply) => {
                 dateString: todayStr,
                 expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
             });
+            // টুলস থেকে নেওয়া নাম্বারটাও ডাটাবেসে সেভ হয়ে যাবে
             newOrder.save().catch(e => console.error("Order Save Error:", e));
         }
         return reply.status(response.status || 200).send(data);
@@ -92,6 +95,9 @@ fastify.post('/v1/getnum', async (request, reply) => {
     }
 });
 
+// ==========================================
+// ⚡ 2. BACKGROUND WORKER (ZERO CPU LOAD)
+// ==========================================
 let isSyncing = false;
 
 const syncMNITBackground = async () => {
@@ -100,16 +106,15 @@ const syncMNITBackground = async () => {
 
     try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15000);
+        const timeoutId = setTimeout(() => controller.abort(), 15000); // 💥 15s MNIT Timeout Fix
 
         let response;
         try {
             response = await fetch(`https://x.mnitnetwork.com/mapi/v1/public/numsuccess/info?t=${Date.now()}`, {
                 method: "GET", 
-                // 💥 THE MAGIC BYPASS HEADERS RESTORED HERE TOO 💥
                 headers: { 
                     "mapikey": REAL_API_KEY, 
-                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; SM-G998B Build/SP1A.210812.016)",
+                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; SM-G998B Build/SP1A.210812.016)", // 💥 Cloudflare Bypass
                     "Accept": "application/json",
                     "Connection": "keep-alive",
                     "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -132,25 +137,29 @@ const syncMNITBackground = async () => {
 
         if (liveOtps.length > 0) {
 
-            // RAW LOG SAVE
-            for (const otpItem of liveOtps) {
-                const mNum = String(otpItem.number || otpItem.phone || otpItem.full_number || "").replace(/\D/g, "");
-                if (mNum) {
-                    try {
-                        mongoose.connection.collection('mnit_raw_logs').updateOne(
-                            { "rawPayload.orderData.searchNumber": mNum, "rawPayload.apiResponse.otp": otpItem.otp },
-                            { $setOnInsert: { timestamp: new Date(), rawPayload: { orderData: { searchNumber: mNum }, apiResponse: otpItem } } },
-                            { upsert: true }
-                        ).catch(()=>{});
-                    } catch(e) {}
+            // 💥 RAW LOG SAVE (BULK WRITE FOR SPEED)
+            try {
+                const bulkOps = liveOtps.filter(o => o.otp).map(otpItem => {
+                    const mNum = String(otpItem.number || otpItem.phone || otpItem.full_number || "").replace(/\D/g, "");
+                    return {
+                        updateOne: {
+                            filter: { "rawPayload.orderData.searchNumber": mNum, "rawPayload.apiResponse.otp": otpItem.otp },
+                            update: { $setOnInsert: { timestamp: new Date(), rawPayload: { orderData: { searchNumber: mNum }, apiResponse: otpItem } } },
+                            upsert: true
+                        }
+                    };
+                });
+                if (bulkOps.length > 0) {
+                    mongoose.connection.collection('mnit_raw_logs').bulkWrite(bulkOps, { ordered: false }).catch(()=>{});
                 }
-            }
+            } catch(e) {}
             
-            const recentOrders = await Order.find({ status: { $in: ["WAIT", "DONE"] } })
-                                            .sort({ _id: -1 })
-                                            .limit(4000)
-                                            .select("_id searchNumber userEmail fullMessage status")
-                                            .lean();
+            // 💥 RAM OPTIMIZED FETCH (Last 25 mins)
+            const twentyFiveMinsAgo = new Date(Date.now() - 25 * 60 * 1000);
+            const recentOrders = await Order.find({ 
+                status: { $in: ["WAIT", "DONE"] },
+                createdAt: { $gte: twentyFiveMinsAgo }
+            }).select("_id searchNumber userEmail fullMessage status").lean();
 
             for (const order of recentOrders) {
                 if (!order.searchNumber) continue;
@@ -168,6 +177,7 @@ const syncMNITBackground = async () => {
                     const incomingMsg = (matchedOtpObj.otp || matchedOtpObj.code || matchedOtpObj.sms || matchedOtpObj.full_message || "").toString().trim();
                     if (!incomingMsg || incomingMsg.toLowerCase() === "waiting..." || incomingMsg.toLowerCase() === "null") continue; 
 
+                    // 💥 SPACED OTP MATCHING FIX (e.g., 548 102)
                     let incomingCode = incomingMsg;
                     const incomingMatch = incomingMsg.match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)/);
                     if (incomingMatch) {
@@ -197,6 +207,7 @@ const syncMNITBackground = async () => {
 
                     let regexStr = incomingCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+                    // 💥 BUG FIX: Removed { new: true } to clear PM2 Mongoose warnings 💥
                     const updatedOrder = await Order.findOneAndUpdate(
                         { _id: order._id, fullMessage: { $not: new RegExp(regexStr) } },
                         { 
@@ -223,6 +234,9 @@ const syncMNITBackground = async () => {
 
 setInterval(syncMNITBackground, 5000);
 
+// ==========================================
+// ⚡ 3. OTP INFO API (For Tool/API Users)
+// ==========================================
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
     try {
         const apiKey = request.headers['mapikey'];
@@ -233,6 +247,7 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
 
         const twentyMinutesAgo = new Date(Date.now() - 20 * 60 * 1000);
         
+        // টুলস ইউজাররা MNIT তে কল না করে আমাদের ডাটাবেস থেকেই OTP পাবে (100% Success & Fast)
         const recentOrders = await Order.find({
             userEmail: user.email,
             status: { $in: ["WAIT", "DONE"] },
@@ -267,6 +282,9 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
     } catch (error) { return reply.status(500).send({ meta: { status: "error" } }); }
 });
 
+// ==========================================
+// 🌍 4. ACTIVE RANGES API
+// ==========================================
 const extractServiceName = (msg) => {
     if (!msg) return "Other";
     const lowerMsg = msg.toLowerCase();
@@ -332,6 +350,9 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
     }
 });
 
+// ==========================================
+// 📋 5. TODAY OTPs API 
+// ==========================================
 fastify.get('/v1/user/today-otps', async (request, reply) => {
     try {
         const apiKey = request.headers['mapikey'];
@@ -357,6 +378,9 @@ fastify.get('/v1/user/today-otps', async (request, reply) => {
     }
 });
 
+// ==========================================
+// 🚀 START SERVER
+// ==========================================
 const startServer = async () => {
     try {
         await connectDB();
