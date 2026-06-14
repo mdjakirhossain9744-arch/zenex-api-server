@@ -44,28 +44,19 @@ async function triggerBinanceAutoPay(user) {
 fastify.post('/v1/getnum', async (request, reply) => {
     try {
         const apiKey = request.headers['mapikey'];
-        if (!apiKey || apiKey.trim().length < 10) {
-            return reply.status(401).send({ meta: { status: "error" }, message: "Invalid API Key" });
-        }
+        if (!apiKey || apiKey.trim().length < 10) return reply.status(401).send({ meta: { status: "error" }, message: "Invalid API Key" });
 
         const user = await User.findOne({ apiKey: apiKey.trim() }).lean();
-        if (!user) return reply.status(401).send({ meta: { status: "error" }, message: "Invalid API Key" });
-        if (!user.isApiActive) return reply.status(403).send({ meta: { status: "error" }, message: "API Disabled" });
-        if (user.status !== "active") return reply.status(403).send({ meta: { status: "error" }, message: "Account Inactive" });
+        if (!user || !user.isApiActive || user.status !== "active") return reply.status(403).send({ meta: { status: "error" }, message: "Unauthorized" });
 
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        const timeoutId = setTimeout(() => controller.abort(), 20000); 
 
         let response;
         try {
             response = await fetch("https://x.mnitnetwork.com/mapi/v1/public/getnum/number", {
                 method: "POST",
-                headers: {
-                    "mapikey": REAL_API_KEY,
-                    "Content-Type": "application/json",
-                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12)",
-                    "Connection": "keep-alive"
-                },
+                headers: { "mapikey": REAL_API_KEY, "Content-Type": "application/json" },
                 body: JSON.stringify(request.body || {}),
                 signal: controller.signal
             });
@@ -91,16 +82,14 @@ fastify.post('/v1/getnum', async (request, reply) => {
             });
             newOrder.save().catch(e => console.error("Order Save Error:", e));
         }
-
         return reply.status(response.status || 200).send(data);
-
     } catch (error) {
         return reply.status(500).send({ meta: { status: "error" }, message: "Server Error" });
     }
 });
 
 // ==========================================
-// ⚡ 2. BACKGROUND WORKER (Runs Independently every 3 seconds - ZERO CPU LOAD)
+// ⚡ 2. BACKGROUND WORKER (ZERO CPU LOAD)
 // ==========================================
 let isSyncing = false;
 
@@ -109,69 +98,61 @@ const syncMNITBackground = async () => {
     isSyncing = true;
 
     try {
-        const now = Date.now();
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 4000);
+        const timeoutId = setTimeout(() => controller.abort(), 15000); // 💥 MNIT 15s Timeout Fix
 
         let response;
         try {
-            response = await fetch(`https://x.mnitnetwork.com/mapi/v1/public/numsuccess/info?t=${now}`, {
-                method: "GET",
-                headers: { "mapikey": REAL_API_KEY, "Connection": "keep-alive" },
+            response = await fetch(`https://x.mnitnetwork.com/mapi/v1/public/numsuccess/info?t=${Date.now()}`, {
+                method: "GET", headers: { "mapikey": REAL_API_KEY, "Connection": "keep-alive" },
                 signal: controller.signal
             });
             clearTimeout(timeoutId);
         } catch (e) {
-            clearTimeout(timeoutId);
-            isSyncing = false;
-            return;
+            clearTimeout(timeoutId); isSyncing = false; return;
         }
 
         if (!response.ok) { isSyncing = false; return; }
         
         const mnetData = await response.json();
-        const rawOtps = mnetData?.data?.otps;
-        const liveOtps = Array.isArray(rawOtps) ? rawOtps : [];
+        
+        let liveOtps = [];
+        if (mnetData?.data?.otps && Array.isArray(mnetData.data.otps)) liveOtps = mnetData.data.otps;
+        else if (mnetData?.data && Array.isArray(mnetData.data)) liveOtps = mnetData.data;
 
         if (liveOtps.length > 0) {
-            const liveNumbers = liveOtps.map(o => String(o.number).replace(/\D/g, ""));
             
-            const matchedOrders = await Order.find({
+            // 💥 RAM OPTIMIZATION & INFINITE SCALING
+            const twentyFiveMinsAgo = new Date(Date.now() - 25 * 60 * 1000);
+            const recentOrders = await Order.find({ 
                 status: { $in: ["WAIT", "DONE"] },
-                $expr: {
-                    $in: [
-                        { $substr: ["$searchNumber", { $subtract: [{ $strLenCP: "$searchNumber" }, 6] }, 6] },
-                        liveNumbers.map(n => n.slice(-6))
-                    ]
-                }
-            }).lean();
+                createdAt: { $gte: twentyFiveMinsAgo }
+            })
+            .select("_id searchNumber userEmail fullMessage status") // 💥 Only fetches required fields to save RAM
+            .lean();
 
-            for (const order of matchedOrders) {
+            for (const order of recentOrders) {
+                if (!order.searchNumber) continue;
                 const cleanSearchNum = String(order.searchNumber).replace(/\D/g, "");
+                if (cleanSearchNum.length < 6) continue;
+                
                 const last6 = cleanSearchNum.slice(-6);
-                const matchedOtpObj = liveOtps.find(m => String(m.number).replace(/\D/g, "").endsWith(last6));
+                
+                const matchedOtpObj = liveOtps.find(m => {
+                    const mNum = String(m.number || m.phone || m.full_number || "").replace(/\D/g, "");
+                    return mNum.endsWith(last6);
+                });
 
                 if (matchedOtpObj) {
-                    const incomingMsg = (matchedOtpObj.otp || "").trim();
-
-                    // 💥 BULLETPROOF FIX: যদি মেসেজ ফাঁকা হয় বা "Waiting..." থাকে, তাহলে এখানেই রিজেক্ট করে দেবে!
-                    if (!incomingMsg || incomingMsg.toLowerCase() === "waiting..." || incomingMsg.toLowerCase() === "null") {
-                        continue; 
-                    }
+                    const incomingMsg = (matchedOtpObj.otp || matchedOtpObj.code || matchedOtpObj.sms || "").toString().trim();
+                    if (!incomingMsg || incomingMsg.toLowerCase() === "waiting..." || incomingMsg.toLowerCase() === "null") continue; 
 
                     const incomingMatch = incomingMsg.match(/\b\d{4,8}\b/);
                     const incomingCode = incomingMatch ? incomingMatch[0] : incomingMsg;
-
-                    // 💥 EXTRA SECURITY: কোড ফাঁকা হলেও রিজেক্ট করবে।
                     if (!incomingCode) continue;
 
                     const existingMsgs = order.fullMessage ? order.fullMessage.split(" _||_ ") : [];
-                    const alreadyExists = existingMsgs.some(msg => {
-                        const match = msg.match(/\b\d{4,8}\b/);
-                        const code = match ? match[0] : msg.trim();
-                        return code === incomingCode;
-                    });
-
+                    const alreadyExists = existingMsgs.some(msg => msg.includes(incomingCode));
                     if (alreadyExists) continue;
 
                     const user = await User.findOne({ email: order.userEmail }).lean();
@@ -180,19 +161,13 @@ const syncMNITBackground = async () => {
                     const isFreeService = incomingMsg.toLowerCase().includes("whatsapp") || incomingMsg.toLowerCase().includes("telegram") || incomingMsg.toLowerCase().includes("t.me");
                     
                     let otpCost = isFreeService ? 0 : (Number(user.otpRate) || 0.50);
-                    let otpCommission = 0;
-                    let agentId = null;
+                    let otpCommission = 0; let agentId = null;
 
                     if (!isFreeService && user.agentEmail) {
-                        const agent = await User.findOne({ 
-                            $or: [{ email: user.agentEmail }, { customAgentMail: user.agentEmail }],
-                            role: "agent" 
-                        }).lean();
-                        
+                        const agent = await User.findOne({ $or: [{ email: user.agentEmail }, { customAgentMail: user.agentEmail }], role: "agent" }).lean();
                         if (agent) {
                             agentId = agent._id;
-                            const agentRate = Number(agent.agentMaxRate) || 0.70;
-                            otpCommission = Math.max(0, Number((agentRate - otpCost).toFixed(2)));
+                            otpCommission = Math.max(0, Number(((Number(agent.agentMaxRate) || 0.70) - otpCost).toFixed(2)));
                         }
                     }
 
@@ -201,31 +176,16 @@ const syncMNITBackground = async () => {
                     const updatedOrder = await Order.findOneAndUpdate(
                         { _id: order._id, fullMessage: { $not: new RegExp(regexStr) } },
                         { 
-                            $set: { 
-                                status: "DONE", 
-                                otp: incomingCode, 
-                                fullMessage: order.fullMessage ? order.fullMessage + " _||_ " + incomingMsg : incomingMsg,
-                                expireAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) 
-                            },
+                            $set: { status: "DONE", otp: incomingCode, fullMessage: order.fullMessage ? order.fullMessage + " _||_ " + incomingMsg : incomingMsg, expireAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) },
                             $inc: { orderCost: otpCost, orderCommission: otpCommission }
                         },
                         { new: true }
                     );
 
                     if (updatedOrder && otpCost > 0) {
-                        const updatedUser = await User.findOneAndUpdate(
-                            { _id: user._id }, 
-                            { $inc: { balance: otpCost } },
-                            { new: true }
-                        );
-
-                        if (otpCommission > 0 && agentId) {
-                            await User.updateOne({ _id: agentId }, { $inc: { agentEarning: otpCommission, balance: otpCommission } });
-                        }
-
-                        if (updatedUser && updatedUser.autoPayEnabled && updatedUser.balance >= 100) {
-                            triggerBinanceAutoPay(updatedUser).catch(() => {});
-                        }
+                        const updatedUser = await User.findOneAndUpdate({ _id: user._id }, { $inc: { balance: otpCost } }, { new: true });
+                        if (otpCommission > 0 && agentId) await User.updateOne({ _id: agentId }, { $inc: { agentEarning: otpCommission, balance: otpCommission } });
+                        if (updatedUser && updatedUser.autoPayEnabled && updatedUser.balance >= 100) triggerBinanceAutoPay(updatedUser).catch(() => {});
                     }
                 }
             }
@@ -237,23 +197,18 @@ const syncMNITBackground = async () => {
     }
 };
 
-setInterval(syncMNITBackground, 3000);
-
+setInterval(syncMNITBackground, 5000);
 
 // ==========================================
-// ⚡ 3. OTP INFO API (0 CPU Load - Just a DB Read)
+// ⚡ 3. OTP INFO API (FOR DEVELOPERS)
 // ==========================================
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
     try {
         const apiKey = request.headers['mapikey'];
-        if (!apiKey || apiKey.trim().length < 10) {
-            return reply.status(401).send({ meta: { status: "error" }, message: "Missing API Key" });
-        }
+        if (!apiKey || apiKey.trim().length < 10) return reply.status(401).send({ meta: { status: "error" }, message: "Missing API Key" });
 
         const user = await User.findOne({ apiKey: apiKey.trim() }).select("email isApiActive").lean();
-        if (!user || !user.isApiActive) {
-            return reply.status(401).send({ meta: { status: "error" }, message: "Unauthorized" });
-        }
+        if (!user || !user.isApiActive) return reply.status(401).send({ meta: { status: "error" }, message: "Unauthorized" });
 
         const twentyMinutesAgo = new Date(Date.now() - 20 * 60 * 1000);
         
@@ -261,7 +216,10 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
             userEmail: user.email,
             status: { $in: ["WAIT", "DONE"] },
             updatedAt: { $gte: twentyMinutesAgo }
-        }).sort({ updatedAt: -1 }).lean();
+        })
+        .select("_id displayNumber searchNumber otp fullMessage country operator updatedAt createdAt status") // 💥 Selective Fetch for API Output
+        .sort({ updatedAt: -1 })
+        .lean();
 
         const databaseOtps = recentOrders.map(order => {
             const d = new Date(order.updatedAt || order.createdAt);
@@ -269,7 +227,6 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
             const formattedDate = `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
             
             let finalOtpText = "";
-            // 💥 BULLETPROOF FIX: বট যেন ভুল করেও ফাঁকা OTP না পায় তার ডাবল চেকিং!
             if (order.status === "DONE" && order.otp && order.otp.toLowerCase() !== "waiting...") {
                 finalOtpText = order.fullMessage || order.otp || "";
             }
@@ -284,16 +241,10 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
             };
         });
 
-        return reply.status(200).send({
-            meta: { status: "success", code: 200 },
-            data: { otps: databaseOtps }
-        });
+        return reply.status(200).send({ meta: { status: "success", code: 200 }, data: { otps: databaseOtps } });
 
-    } catch (error) {
-        return reply.status(500).send({ meta: { status: "error" }, message: "Server Error" });
-    }
+    } catch (error) { return reply.status(500).send({ meta: { status: "error" } }); }
 });
-
 
 // ==========================================
 // 🌍 4. ACTIVE RANGES API
@@ -363,7 +314,6 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
     }
 });
 
-
 // ==========================================
 // 📋 5. TODAY OTPs API 
 // ==========================================
@@ -391,7 +341,6 @@ fastify.get('/v1/user/today-otps', async (request, reply) => {
         return reply.status(500).send({ error: "Server Error" });
     }
 });
-
 
 // ==========================================
 // 🚀 START SERVER
