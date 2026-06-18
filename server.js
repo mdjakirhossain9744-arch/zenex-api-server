@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import { User, Order } from './models.js';
-import fastifyRateLimit from '@fastify/rate-limit'; // 🔥 Added for DDoS Protection & Tool Handling
+import fastifyRateLimit from '@fastify/rate-limit'; 
 
 dotenv.config();
 
@@ -15,13 +15,12 @@ fastify.register(import('@fastify/cors'), {
     allowedHeaders: ['Content-Type', 'mapikey']
 });
 
-// 🔥 Soft Throttling (Rate Limiter): Max 10 requests per second per API Key
 fastify.register(fastifyRateLimit, {
     max: 10,
     timeWindow: '1 second',
     keyGenerator: req => req.headers['mapikey'] || req.ip,
     errorResponseBuilder: function (request, context) {
-        return { meta: { status: "error", code: 429 }, message: "Too Many Requests - Slow down (Soft Throttling active)" };
+        return { meta: { status: "error", code: 429 }, message: "Too Many Requests - Soft Throttling active" };
     }
 });
 
@@ -31,7 +30,6 @@ const connectDB = async () => {
         await mongoose.connect(process.env.MONGODB_URI, opts);
         console.log('✅ ZENEX Database Connected to API Microservice! 🚀');
 
-        // 🔥 Advanced Compound Indexing for Ultra-Low Latency (< 50ms)
         try {
             const db = mongoose.connection;
             await db.collection('mnit_raw_logs').createIndex({ "timestamp": 1 }, { expireAfterSeconds: 172800 });
@@ -46,7 +44,7 @@ const connectDB = async () => {
 };
 
 const getUTCDateString = (dateObj = new Date()) => new Date(dateObj).toISOString().split('T')[0];
-const REAL_API_KEY = "M_7VX25KAJI";
+const REAL_API_KEY = "MK2447V3313";
 
 async function triggerBinanceAutoPay(user) {
     try {
@@ -59,7 +57,7 @@ async function triggerBinanceAutoPay(user) {
 }
 
 // ==========================================
-// 🚀 1. GET NUMBER API (Optimized for Bots & Tools)
+// 🚀 1. GET NUMBER API (Optimized for Bots)
 // ==========================================
 fastify.route({
     method: ['GET', 'POST'], 
@@ -75,28 +73,24 @@ fastify.route({
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 20000); 
 
-            // 🔥 Connection Drop Management: Stop MNIT query instantly to save CPU if bot disconnects
             request.raw.on('close', () => { if (request.raw.aborted) controller.abort(); });
 
             const reqData = request.body || request.query || {};
-            const mnitPayload = {
-                range: reqData.range || undefined,
-                is_national: reqData.is_national === true || reqData.is_national === "true",
-                remove_plus: reqData.remove_plus === true || reqData.remove_plus === "true"
-            };
+            // 🔥 Extract specific rid, ignoring X or XXX from old bot requests
+            const rid = (reqData.range || "").replace(/x/gi, '');
 
             let response;
             try {
-                response = await fetch("https://x.mnitnetwork.com/mapi/v1/public/getnum/number", {
+                response = await fetch("https://api.2oo9.cloud/MXS47FLFX0U/tness/@public/api/getnum", {
                     method: "POST",
                     headers: { 
-                        "mapikey": REAL_API_KEY, 
+                        "mauthapi": REAL_API_KEY, 
                         "Content-Type": "application/json",
-                        "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; SM-G998B Build/SP1A.210812.016)", 
+                        "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12)", 
                         "Accept": "application/json",
                         "Connection": "keep-alive"
                     },
-                    body: JSON.stringify(mnitPayload),
+                    body: JSON.stringify({ rid }),
                     signal: controller.signal
                 });
                 clearTimeout(timeoutId);
@@ -107,12 +101,12 @@ fastify.route({
 
             const data = await response.json();
 
-            if (data.meta?.status === "success") {
+            if (data.meta?.code === 200 && data.data) {
                 const todayStr = getUTCDateString();
                 const newOrder = new Order({
                     userEmail: user.email,
-                    searchNumber: data.data.full_number,
-                    displayNumber: data.data.number || `+${data.data.full_number}`,
+                    searchNumber: data.data.no_plus_number,
+                    displayNumber: data.data.full_number,
                     country: data.data.country || "Unknown",
                     operator: data.data.operator || "Any",
                     status: "WAIT",
@@ -120,8 +114,23 @@ fastify.route({
                     expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
                 });
                 newOrder.save().catch(e => console.error("Order Save Error:", e));
+                
+                // 🔥 Transformer: Return in old format so Bot continues working flawlessly 0ms
+                return reply.status(200).send({
+                    meta: { status: "success", code: 200 },
+                    data: {
+                        copy: data.data.full_number,
+                        full_number: data.data.no_plus_number,
+                        number: data.data.full_number,
+                        country: data.data.country,
+                        iso: "Unknown",
+                        operator: data.data.operator,
+                        status: "pending"
+                    }
+                });
             }
-            return reply.status(response.status || 200).send(data);
+
+            return reply.status(400).send({ meta: { status: "error" }, message: data.message || "Out of stock" });
         } catch (error) {
             return reply.status(500).send({ meta: { status: "error" }, message: "Server Error" });
         }
@@ -129,7 +138,7 @@ fastify.route({
 });
 
 // ==========================================
-// ⚡ 2. BACKGROUND WORKER 
+// ⚡ 2. BACKGROUND WORKER (Zero-Loss Engine)
 // ==========================================
 let isSyncing = false;
 
@@ -143,13 +152,9 @@ const syncMNITBackground = async () => {
 
         let response;
         try {
-            response = await fetch(`https://x.mnitnetwork.com/mapi/v1/public/numsuccess/info?t=${Date.now()}`, {
+            response = await fetch(`https://api.2oo9.cloud/MXS47FLFX0U/tness/@public/api/success-otp?t=${Date.now()}`, {
                 method: "GET", 
-                headers: { 
-                    "mapikey": REAL_API_KEY, 
-                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; SM-G998B Build/SP1A.210812.016)", 
-                    "Accept": "application/json"
-                },
+                headers: { "mauthapi": REAL_API_KEY, "Accept": "application/json" },
                 signal: controller.signal
             });
             clearTimeout(timeoutId);
@@ -163,15 +168,13 @@ const syncMNITBackground = async () => {
         
         let liveOtps = [];
         if (mnetData?.data?.otps && Array.isArray(mnetData.data.otps)) liveOtps = mnetData.data.otps;
-        else if (mnetData?.data && Array.isArray(mnetData.data)) liveOtps = mnetData.data;
 
         if (liveOtps.length > 0) {
             
             try {
-                const bulkOps = liveOtps.filter(o => o.otp).map(otpItem => {
-                    const mNum = String(otpItem.number || otpItem.phone || otpItem.full_number || "").replace(/\D/g, "");
-                    const exactTime = otpItem.created_at || "NO_TIME";
-                    const realUniqueKey = `${otpItem.nid}_${mNum}_${exactTime}`; 
+                const bulkOps = liveOtps.filter(o => o.message).map(otpItem => {
+                    // 🔥 Ultimate Anti-Spam: Directly using unique otp_id from API
+                    const realUniqueKey = String(otpItem.otp_id); 
                     return {
                         updateOne: {
                             filter: { uniqueRawKey: realUniqueKey },
@@ -179,10 +182,10 @@ const syncMNITBackground = async () => {
                                 $setOnInsert: {
                                     timestamp: new Date(),
                                     uniqueRawKey: realUniqueKey,
-                                    rawPayload: { orderData: { searchNumber: mNum }, apiResponse: otpItem }
+                                    rawPayload: { orderData: { searchNumber: otpItem.number }, apiResponse: otpItem }
                                 }
                             },
-                            upsert: true // Anti-Spam Raw Log
+                            upsert: true
                         }
                     };
                 });
@@ -191,7 +194,7 @@ const syncMNITBackground = async () => {
             
             const otpGroups = {};
             liveOtps.forEach(m => {
-                const mNum = String(m.number || m.phone || m.full_number || "").replace(/\D/g, "");
+                const mNum = String(m.number || "").replace(/\D/g, "");
                 if (mNum.length >= 6) {
                     const key = mNum.length > 9 ? mNum.slice(-9) : mNum;
                     if (!otpGroups[key]) otpGroups[key] = [];
@@ -217,13 +220,10 @@ const syncMNITBackground = async () => {
                     for (const matchedOtpObj of matchedOtps) {
 
                         const orderTime = new Date(order.createdAt).getTime(); 
-                        const otpTimeStr = matchedOtpObj.created_at;
-                        if (otpTimeStr) {
-                            const otpTime = new Date(otpTimeStr.replace(/-/g, '/')).getTime();
-                            if (otpTime < (orderTime - 60000)) continue; 
-                        }
+                        const otpTime = matchedOtpObj.time; // Unix ms natively!
+                        if (otpTime < (orderTime - 60000)) continue; 
 
-                        const incomingMsgRaw = (matchedOtpObj.otp || matchedOtpObj.code || matchedOtpObj.sms || matchedOtpObj.full_message || "").toString().trim();
+                        const incomingMsgRaw = (matchedOtpObj.message || "").toString().trim();
                         const lowerMsg = incomingMsgRaw.toLowerCase();
                         
                         if (!incomingMsgRaw || ["waiting...", "waiting", "pending", "null", "false"].includes(lowerMsg)) continue;
@@ -237,9 +237,8 @@ const syncMNITBackground = async () => {
                         }
                         if (!incomingCode || incomingCode.length < 3) continue; 
 
-                        const exactTime = matchedOtpObj.created_at || "NO_TIME";
-                        const exactCountry = matchedOtpObj.country || "Unknown";
-                        const uniqueProcessKey = `${incomingCode}_${exactTime}_${exactCountry}`; // Zero-Loss Multi OTP Engine
+                        // 🔥 Zero-Loss Engine Upgraded: Using flawless API otp_id directly
+                        const uniqueProcessKey = String(matchedOtpObj.otp_id); 
 
                         if (order.processedKeys && order.processedKeys.includes(uniqueProcessKey)) continue; 
 
@@ -289,7 +288,7 @@ const syncMNITBackground = async () => {
     }
 };
 
-setInterval(syncMNITBackground, 5000);
+setInterval(syncMNITBackground, 3000); // Triggering slightly faster as new API handles caching natively!
 
 // ==========================================
 // ⚡ 3. OTP INFO API
@@ -420,7 +419,7 @@ const startServer = async () => {
     try {
         await connectDB();
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice is LIVE at: http://localhost:${process.env.PORT || 4000}`);
+        console.log(`⚡ ZENEX Microservice V4 is LIVE at: http://localhost:${process.env.PORT || 4000}`);
     } catch (err) { process.exit(1); }
 };
 startServer();

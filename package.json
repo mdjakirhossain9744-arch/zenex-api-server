@@ -12,6 +12,7 @@
   "license": "ISC",
   "dependencies": {
     "@fastify/cors": "^11.2.0",
+    "@fastify/rate-limit": "^11.0.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "fastify": "^5.8.5",
