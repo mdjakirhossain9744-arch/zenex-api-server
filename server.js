@@ -415,6 +415,53 @@ fastify.get('/v1/user/today-otps', async (request, reply) => {
     } catch (error) { return reply.status(500).send({ error: "Server Error" }); }
 });
 
+// ==========================================
+// 💥 6. NEW: ZERO-LOAD BULK DOWNLOAD API 💥
+// ==========================================
+fastify.post('/v1/internal/download-otps', async (request, reply) => {
+    try {
+        const { email, targetDate } = request.body || {};
+        if (!email || !targetDate) return reply.status(400).send({ success: false, message: "Missing params" });
+
+        // 🔥 HIGH-PERFORMANCE: MongoDB Projection ($project)
+        // Fetching ONLY 4 fields and directly outputting plain text String without array building
+        const orders = await Order.find({ 
+            userEmail: email, 
+            dateString: targetDate, 
+            status: "DONE" 
+        }).select("displayNumber searchNumber otp fullMessage -_id").lean();
+
+        if (!orders || orders.length === 0) return reply.send({ success: true, textData: "" });
+
+        let textData = "";
+        
+        for (let i = 0; i < orders.length; i++) {
+            const item = orders[i];
+            const num = String(item.displayNumber || item.searchNumber).replace(/\D/g, '');
+            
+            if (item.fullMessage && item.fullMessage.includes("_||_")) {
+                const msgsArray = item.fullMessage.split("_||_");
+                for (let j = 0; j < msgsArray.length; j++) {
+                    const msg = msgsArray[j].trim();
+                    if (msg) {
+                        const match = msg.match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)|(?:G-\d{6,8})/);
+                        const finalOtp = match ? match[0].replace(/[\s-]+/g, '') : item.otp.replace(/[\s-]+/g, '');
+                        textData += `${num}|${finalOtp}\n`;
+                    }
+                }
+            } else {
+                const match = item.otp ? String(item.otp).match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)|(?:G-\d{6,8})/) : null;
+                const finalOtp = match ? match[0].replace(/[\s-]+/g, '') : String(item.otp || "").replace(/[\s-]+/g, '');
+                textData += `${num}|${finalOtp}\n`;
+            }
+        }
+
+        return reply.send({ success: true, textData });
+    } catch (error) {
+        return reply.status(500).send({ success: false, message: "Server Error" });
+    }
+});
+
 const startServer = async () => {
     try {
         await connectDB();
