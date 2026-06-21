@@ -131,6 +131,8 @@ fastify.route({
                         country: data.data.country || "Unknown",
                         operator: data.data.operator || "Any",
                         status: "WAIT",
+                        fullMessage: "Waiting...", // 💥 FIX: Added for Web UI consistency
+                        otp: "Waiting...",         // 💥 FIX: Added for Web UI consistency
                         dateString: todayStr,
                         expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
                     });
@@ -282,7 +284,7 @@ const syncMNITBackground = async () => {
                                 $set: { 
                                     status: "DONE", 
                                     otp: incomingCode, 
-                                    fullMessage: order.fullMessage ? order.fullMessage + " _||_ " + incomingMsgRaw : incomingMsgRaw, 
+                                    fullMessage: order.fullMessage && order.fullMessage !== "Waiting..." ? order.fullMessage + " _||_ " + incomingMsgRaw : incomingMsgRaw, // 💥 Updated logic so "Waiting..." doesn't mix with real OTP
                                     expireAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) 
                                 },
                                 $inc: { orderCost: otpCost, orderCommission: otpCommission },
