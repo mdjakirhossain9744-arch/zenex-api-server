@@ -46,6 +46,9 @@ const connectDB = async () => {
 const getUTCDateString = (dateObj = new Date()) => new Date(dateObj).toISOString().split('T')[0];
 const REAL_API_KEY = "MK2447V3313";
 
+// 🔥 MAGIC 1: IN-MEMORY CACHE FOR SUPER FAST API AUTH (0ms DB Latency)
+const apiAuthCache = new Map();
+
 async function triggerBinanceAutoPay(user) {
     try {
         await fetch(`${process.env.MAIN_SITE_URL}/api/cron/process-binance-payout`, {
@@ -67,8 +70,18 @@ fastify.route({
             const apiKey = request.headers['mapikey'] || (request.query && request.query.mapikey);
             if (!apiKey || apiKey.trim().length < 10) return reply.status(401).send({ meta: { status: "error" }, message: "Invalid API Key" });
 
-            const user = await User.findOne({ apiKey: apiKey.trim() }).lean();
-            if (!user || !user.isApiActive || user.status !== "active") return reply.status(403).send({ meta: { status: "error" }, message: "Unauthorized" });
+            const cleanKey = apiKey.trim();
+            
+            // ⚡ FAST AUTH: Check RAM Cache first before hitting MongoDB!
+            let user = apiAuthCache.get(cleanKey);
+            if (!user) {
+                user = await User.findOne({ apiKey: cleanKey }).lean();
+                if (!user || !user.isApiActive || user.status !== "active") return reply.status(403).send({ meta: { status: "error" }, message: "Unauthorized" });
+                
+                // Cache user for 60 seconds (Bot spamming won't hurt the DB anymore)
+                apiAuthCache.set(cleanKey, user);
+                setTimeout(() => apiAuthCache.delete(cleanKey), 60000); 
+            }
 
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 20000); 
@@ -102,17 +115,21 @@ fastify.route({
 
             if (data.meta?.code === 200 && data.data) {
                 const todayStr = getUTCDateString();
-                const newOrder = new Order({
-                    userEmail: user.email,
-                    searchNumber: data.data.no_plus_number,
-                    displayNumber: data.data.full_number,
-                    country: data.data.country || "Unknown",
-                    operator: data.data.operator || "Any",
-                    status: "WAIT",
-                    dateString: todayStr,
-                    expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
+                
+                // ⚡ FIRE & FORGET: Don't wait for DB save, reply to Bot instantly!
+                setImmediate(() => {
+                    const newOrder = new Order({
+                        userEmail: user.email,
+                        searchNumber: data.data.no_plus_number,
+                        displayNumber: data.data.full_number,
+                        country: data.data.country || "Unknown",
+                        operator: data.data.operator || "Any",
+                        status: "WAIT",
+                        dateString: todayStr,
+                        expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
+                    });
+                    newOrder.save().catch(() => {});
                 });
-                newOrder.save().catch(e => console.error("Order Save Error:", e));
                 
                 return reply.status(200).send({
                     meta: { status: "success", code: 200 },
@@ -280,7 +297,8 @@ const syncMNITBackground = async () => {
     } catch (error) {
         console.error("Background Sync Error:", error.message);
     } finally {
-        isSyncing = false;
+        // ⚡ SLIGHT DELAY TO FREE EVENT LOOP (PREVENTS BLOCKING BOTS)
+        setTimeout(() => { isSyncing = false; }, 200);
     }
 };
 
@@ -293,8 +311,17 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
     try {
         const apiKey = request.headers['mapikey'];
         if (!apiKey || apiKey.trim().length < 10) return reply.status(401).send({ meta: { status: "error" }, message: "Missing API Key" });
+        const cleanKey = apiKey.trim();
 
-        const user = await User.findOne({ apiKey: apiKey.trim() }).select("email isApiActive").lean();
+        let user = apiAuthCache.get(cleanKey);
+        if (!user) {
+            user = await User.findOne({ apiKey: cleanKey }).select("email isApiActive").lean();
+            if (user) {
+                apiAuthCache.set(cleanKey, user);
+                setTimeout(() => apiAuthCache.delete(cleanKey), 60000); 
+            }
+        }
+
         if (!user || !user.isApiActive) return reply.status(401).send({ meta: { status: "error" }, message: "Unauthorized" });
 
         const twentyMinutesAgo = new Date(Date.now() - 20 * 60 * 1000);
@@ -401,7 +428,13 @@ fastify.get('/v1/user/today-otps', async (request, reply) => {
     try {
         const apiKey = request.headers['mapikey'];
         if (!apiKey) return reply.status(401).send({ error: "Invalid API Key" });
-        const user = await User.findOne({ apiKey: apiKey.trim() }).select("email").lean();
+        const cleanKey = apiKey.trim();
+        
+        let user = apiAuthCache.get(cleanKey);
+        if (!user) {
+            user = await User.findOne({ apiKey: cleanKey }).select("email").lean();
+        }
+        
         if (!user) return reply.status(401).send({ error: "Invalid API Key" });
         const todayStr = getUTCDateString();
         const orders = await Order.find({ userEmail: user.email, dateString: todayStr, status: "DONE" }).select("displayNumber otp -_id").lean();
