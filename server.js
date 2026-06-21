@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import cors from 'cors';
 import { User, Order } from './models.js';
 import fastifyRateLimit from '@fastify/rate-limit'; 
+import fastifyFormbody from '@fastify/formbody'; // 💥 NEW: Parses all bot data formats!
 
 dotenv.config();
 
@@ -14,6 +15,8 @@ fastify.register(import('@fastify/cors'), {
     methods: ['GET', 'POST', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'mapikey']
 });
+
+fastify.register(fastifyFormbody); // 💥 NEW: Makes Fastify flexible like Next.js
 
 fastify.register(fastifyRateLimit, {
     max: 10,
@@ -78,7 +81,7 @@ fastify.route({
                 user = await User.findOne({ apiKey: cleanKey }).lean();
                 if (!user || !user.isApiActive || user.status !== "active") return reply.status(403).send({ meta: { status: "error" }, message: "Unauthorized" });
                 
-                // Cache user for 60 seconds (Bot spamming won't hurt the DB anymore)
+                // Cache user for 60 seconds
                 apiAuthCache.set(cleanKey, user);
                 setTimeout(() => apiAuthCache.delete(cleanKey), 60000); 
             }
@@ -88,8 +91,12 @@ fastify.route({
 
             request.raw.on('close', () => { if (request.raw.aborted) controller.abort(); });
 
+            // 💥 FIX: Now reads body correctly even if bots send wrong Content-Type
             const reqData = request.body || request.query || {};
-            const rid = (reqData.range || "").replace(/x/gi, '');
+            const rawRange = typeof reqData === 'string' ? reqData : (reqData.range || "");
+            const rid = rawRange.replace(/x/gi, '').trim();
+
+            if (!rid) return reply.status(400).send({ meta: { status: "error" }, message: "Invalid Range Format" });
 
             let response;
             try {
@@ -99,8 +106,7 @@ fastify.route({
                         "mauthapi": REAL_API_KEY, 
                         "Content-Type": "application/json",
                         "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12)", 
-                        "Accept": "application/json",
-                        "Connection": "keep-alive"
+                        "Accept": "application/json"
                     },
                     body: JSON.stringify({ rid }),
                     signal: controller.signal
@@ -116,7 +122,7 @@ fastify.route({
             if (data.meta?.code === 200 && data.data) {
                 const todayStr = getUTCDateString();
                 
-                // ⚡ FIRE & FORGET: Don't wait for DB save, reply to Bot instantly!
+                // ⚡ FIRE & FORGET
                 setImmediate(() => {
                     const newOrder = new Order({
                         userEmail: user.email,
@@ -153,7 +159,7 @@ fastify.route({
 });
 
 // ==========================================
-// ⚡ 2. BACKGROUND WORKER (Zero-Loss Engine)
+// ⚡ 2. BACKGROUND WORKER
 // ==========================================
 let isSyncing = false;
 
@@ -297,7 +303,6 @@ const syncMNITBackground = async () => {
     } catch (error) {
         console.error("Background Sync Error:", error.message);
     } finally {
-        // ⚡ SLIGHT DELAY TO FREE EVENT LOOP (PREVENTS BLOCKING BOTS)
         setTimeout(() => { isSyncing = false; }, 200);
     }
 };
