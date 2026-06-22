@@ -17,8 +17,6 @@ fastify.register(fastifyCors, {
 
 fastify.register(fastifyFormbody); 
 
-// 💥 FIX: NO MORE RATE LIMITING! Users can hit unlimited requests per second.
-
 const connectDB = async () => {
     try {
         const opts = { maxPoolSize: 150, minPoolSize: 10 };
@@ -33,10 +31,9 @@ const connectDB = async () => {
 const getUTCDateString = (dateObj = new Date()) => new Date(dateObj).toISOString().split('T')[0];
 const REAL_API_KEY = process.env.MAIN_PROVIDER_API_KEY || "MK2447V3313"; 
 
-// 🔥 GLOBAL RAM CACHES (To protect DB from unlimited traffic)
 const apiAuthCache = new Map();
 const globalWorkerUserCache = new Map(); 
-const userOtpResponseCache = new Map(); // 💥 FIX: Protects DB when users spam OTP checking!
+const userOtpResponseCache = new Map(); 
 
 setInterval(() => {
     const now = Date.now();
@@ -61,7 +58,7 @@ async function triggerBinanceAutoPay(user) {
 }
 
 // ==========================================
-// 🚀 1. GET NUMBER API (Unlimited Traffic Ready)
+// 🚀 1. GET NUMBER API 
 // ==========================================
 fastify.route({
     method: ['GET', 'POST'], 
@@ -274,7 +271,8 @@ const syncMNITBackground = async () => {
                         );
 
                         if (updatedOrder && otpCost > 0) {
-                            const updatedUser = await User.findOneAndUpdate({ _id: user._id }, { $inc: { balance: -otpCost } }, { returnDocument: 'after' });
+                            // 💥 FIX: Removed the minus (-) sign. Now it adds balance (+otpCost) directly!
+                            const updatedUser = await User.findOneAndUpdate({ _id: user._id }, { $inc: { balance: otpCost } }, { returnDocument: 'after' });
                             if (otpCommission > 0 && agentId) await User.updateOne({ _id: agentId }, { $inc: { agentEarning: otpCommission, balance: otpCommission } });
                             if (updatedUser && updatedUser.autoPayEnabled && updatedUser.balance >= 100) triggerBinanceAutoPay(updatedUser).catch(() => {});
                         }
@@ -292,7 +290,7 @@ const syncMNITBackground = async () => {
 setInterval(syncMNITBackground, 3000); 
 
 // ==========================================
-// ⚡ 3. OTP INFO API (Protected with Micro-Cache)
+// ⚡ 3. OTP INFO API
 // ==========================================
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
     try {
@@ -300,7 +298,6 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
         if (!apiKey || apiKey.trim().length < 10) return reply.status(401).send({ meta: { status: "error" }, message: "Missing API Key" });
         const cleanKey = apiKey.trim();
 
-        // 💥 FIX: If user spams, serve from RAM instantly (Protects DB)
         const cachedOtpData = userOtpResponseCache.get(cleanKey);
         if (cachedOtpData && Date.now() < cachedOtpData.expiry) {
             return reply.status(200).send({ meta: { status: "success", code: 200 }, data: { otps: cachedOtpData.otps } });
@@ -351,7 +348,6 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
 
         const validOtps = expandedOtps.filter(o => o.otp && o.otp.trim() !== "" && !["waiting...", "pending", "null"].includes(o.otp.toLowerCase()));
 
-        // Save to cache for 3 seconds so spammers don't kill DB
         userOtpResponseCache.set(cleanKey, { otps: validOtps, expiry: Date.now() + 3000 });
 
         return reply.status(200).send({ meta: { status: "success", code: 200 }, data: { otps: validOtps } });
