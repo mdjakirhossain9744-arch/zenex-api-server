@@ -2,15 +2,13 @@ import Fastify from 'fastify';
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import { User, Order } from './models.js';
-import fastifyRateLimit from '@fastify/rate-limit'; 
 import fastifyFormbody from '@fastify/formbody'; 
-import fastifyCors from '@fastify/cors'; // 💥 FIX: Corrected Fastify CORS import
+import fastifyCors from '@fastify/cors'; 
 
 dotenv.config();
 
 const fastify = Fastify({ logger: false });
 
-// 💥 FIX: Corrected CORS Registration for Fastify
 fastify.register(fastifyCors, { 
     origin: '*',
     methods: ['GET', 'POST', 'OPTIONS'],
@@ -19,28 +17,13 @@ fastify.register(fastifyCors, {
 
 fastify.register(fastifyFormbody); 
 
-fastify.register(fastifyRateLimit, {
-    max: 10,
-    timeWindow: '1 second',
-    keyGenerator: req => req.headers['mapikey'] || req.ip,
-    errorResponseBuilder: function (request, context) {
-        return { meta: { status: "error", code: 429 }, message: "Too Many Requests - Soft Throttling active" };
-    }
-});
+// 💥 FIX: NO MORE RATE LIMITING! Users can hit unlimited requests per second.
 
 const connectDB = async () => {
     try {
-        const opts = { maxPoolSize: 100, minPoolSize: 10 };
+        const opts = { maxPoolSize: 150, minPoolSize: 10 };
         await mongoose.connect(process.env.MONGODB_URI, opts);
         console.log('✅ ZENEX Database Connected to API Microservice! 🚀');
-
-        try {
-            const db = mongoose.connection;
-            await db.collection('mnit_raw_logs').createIndex({ "timestamp": 1 }, { expireAfterSeconds: 172800 });
-            await db.collection('orders').createIndex({ userEmail: 1, status: 1, createdAt: -1 });
-            await db.collection('orders').createIndex({ status: 1, updatedAt: -1 });
-        } catch(e) { } 
-
     } catch (error) {
         console.error('❌ Database Connection Failed:', error);
         process.exit(1);
@@ -48,18 +31,24 @@ const connectDB = async () => {
 };
 
 const getUTCDateString = (dateObj = new Date()) => new Date(dateObj).toISOString().split('T')[0];
-const REAL_API_KEY = process.env.MAIN_PROVIDER_API_KEY || "MK2447V3313"; // Using fallback if env is missing
+const REAL_API_KEY = process.env.MAIN_PROVIDER_API_KEY || "MK2447V3313"; 
 
-// 🔥 FIX: MEMORY LEAK ELIMINATED! Removed 'setTimeout' per request.
+// 🔥 GLOBAL RAM CACHES (To protect DB from unlimited traffic)
 const apiAuthCache = new Map();
+const globalWorkerUserCache = new Map(); 
+const userOtpResponseCache = new Map(); // 💥 FIX: Protects DB when users spam OTP checking!
 
-// Runs once a minute to clean up RAM cache without blocking Event Loop
 setInterval(() => {
     const now = Date.now();
     for (const [key, value] of apiAuthCache.entries()) {
         if (now > value.expiry) apiAuthCache.delete(key);
     }
-}, 60000); 
+    for (const [key, value] of userOtpResponseCache.entries()) {
+        if (now > value.expiry) userOtpResponseCache.delete(key);
+    }
+}, 30000); 
+
+setInterval(() => { globalWorkerUserCache.clear(); }, 5 * 60 * 1000); 
 
 async function triggerBinanceAutoPay(user) {
     try {
@@ -72,7 +61,7 @@ async function triggerBinanceAutoPay(user) {
 }
 
 // ==========================================
-// 🚀 1. GET NUMBER API 
+// 🚀 1. GET NUMBER API (Unlimited Traffic Ready)
 // ==========================================
 fastify.route({
     method: ['GET', 'POST'], 
@@ -84,15 +73,12 @@ fastify.route({
 
             const cleanKey = apiKey.trim();
             
-            // ⚡ FAST AUTH FIX
             let cachedObj = apiAuthCache.get(cleanKey);
             let user;
 
             if (!cachedObj || Date.now() > cachedObj.expiry) {
                 user = await User.findOne({ apiKey: cleanKey }).lean();
                 if (!user || !user.isApiActive || user.status !== "active") return reply.status(403).send({ meta: { status: "error" }, message: "Unauthorized" });
-                
-                // Cache user for 60 seconds
                 apiAuthCache.set(cleanKey, { user, expiry: Date.now() + 60000 });
             } else {
                 user = cachedObj.user;
@@ -106,7 +92,10 @@ fastify.route({
             const rawRange = typeof reqData === 'string' ? reqData : (reqData.range || "");
             const rid = rawRange.replace(/x/gi, '').trim();
 
-            if (!rid) return reply.status(400).send({ meta: { status: "error" }, message: "Invalid Range Format" });
+            if (!rid) {
+                clearTimeout(timeoutId);
+                return reply.status(400).send({ meta: { status: "error" }, message: "Invalid Range Format" });
+            }
 
             let response;
             try {
@@ -132,7 +121,6 @@ fastify.route({
 
             if (data.meta?.code === 200 && data.data) {
                 const todayStr = getUTCDateString();
-                
                 setImmediate(() => {
                     const newOrder = new Order({
                         userEmail: user.email,
@@ -181,7 +169,7 @@ const syncMNITBackground = async () => {
 
     try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15000); 
+        const timeoutId = setTimeout(() => controller.abort(), 12000); 
 
         let response;
         try {
@@ -191,40 +179,17 @@ const syncMNITBackground = async () => {
                 signal: controller.signal
             });
             clearTimeout(timeoutId);
-        } catch (e) {
-            clearTimeout(timeoutId); isSyncing = false; return;
-        }
+        } catch (e) { clearTimeout(timeoutId); return; }
 
-        if (!response.ok) { isSyncing = false; return; }
+        if (!response.ok) return; 
         
         let mnetData;
-        try { mnetData = await response.json(); } catch(e) { isSyncing = false; return; }
+        try { mnetData = await response.json(); } catch(e) { return; }
         
         let liveOtps = [];
         if (mnetData?.data?.otps && Array.isArray(mnetData.data.otps)) liveOtps = mnetData.data.otps;
 
         if (liveOtps.length > 0) {
-            
-            try {
-                const bulkOps = liveOtps.filter(o => o.message).map(otpItem => {
-                    const realUniqueKey = String(otpItem.otp_id); 
-                    return {
-                        updateOne: {
-                            filter: { uniqueRawKey: realUniqueKey },
-                            update: { 
-                                $setOnInsert: {
-                                    timestamp: new Date(),
-                                    uniqueRawKey: realUniqueKey,
-                                    rawPayload: { orderData: { searchNumber: otpItem.number }, apiResponse: otpItem }
-                                }
-                            },
-                            upsert: true
-                        }
-                    };
-                });
-                if (bulkOps.length > 0) mongoose.connection.collection('mnit_raw_logs').bulkWrite(bulkOps, { ordered: false }).catch(()=>{});
-            } catch(e) {}
-            
             const otpGroups = {};
             liveOtps.forEach(m => {
                 const mNum = String(m.number || "").replace(/\D/g, "");
@@ -241,10 +206,6 @@ const syncMNITBackground = async () => {
                 createdAt: { $gte: twentyFiveMinsAgo }
             }).select("_id searchNumber userEmail fullMessage status processedKeys createdAt").lean();
 
-            // 💥 FIX: DB SPAM PREVENTION - Local Cycle Cache for Users & Agents
-            const cycleUsersMap = new Map();
-            const cycleAgentsMap = new Map();
-
             for (const order of recentOrders) {
                 if (!order.searchNumber) continue;
                 const cleanSearchNum = String(order.searchNumber).replace(/\D/g, "");
@@ -255,7 +216,6 @@ const syncMNITBackground = async () => {
 
                 if (matchedOtps && matchedOtps.length > 0) {
                     for (const matchedOtpObj of matchedOtps) {
-
                         const orderTime = new Date(order.createdAt).getTime(); 
                         const otpTime = matchedOtpObj.time; 
                         if (otpTime < (orderTime - 60000)) continue; 
@@ -269,19 +229,16 @@ const syncMNITBackground = async () => {
 
                         let incomingCode = incomingMsgRaw;
                         const incomingMatch = incomingMsgRaw.match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)/);
-                        if (incomingMatch && incomingMatch[0]) {
-                            incomingCode = incomingMatch[0].trim(); 
-                        }
+                        if (incomingMatch && incomingMatch[0]) incomingCode = incomingMatch[0].trim(); 
                         if (!incomingCode || incomingCode.length < 3) continue; 
 
                         const uniqueProcessKey = String(matchedOtpObj.otp_id); 
                         if (order.processedKeys && order.processedKeys.includes(uniqueProcessKey)) continue; 
 
-                        // 💥 FIX: Hit cache instead of Database on every loop!
-                        let user = cycleUsersMap.get(order.userEmail);
+                        let user = globalWorkerUserCache.get(order.userEmail);
                         if (!user) {
                             user = await User.findOne({ email: order.userEmail }).lean();
-                            if (user) cycleUsersMap.set(order.userEmail, user);
+                            if (user) globalWorkerUserCache.set(order.userEmail, user);
                         }
                         if (!user) continue;
 
@@ -290,10 +247,10 @@ const syncMNITBackground = async () => {
                         let otpCommission = 0; let agentId = null;
 
                         if (!isFreeService && user.agentEmail) {
-                            let agent = cycleAgentsMap.get(user.agentEmail);
+                            let agent = globalWorkerUserCache.get(user.agentEmail);
                             if (!agent) {
                                 agent = await User.findOne({ $or: [{ email: user.agentEmail }, { customAgentMail: user.agentEmail }], role: "agent" }).lean();
-                                if (agent) cycleAgentsMap.set(user.agentEmail, agent);
+                                if (agent) globalWorkerUserCache.set(user.agentEmail, agent);
                             }
                             if (agent) {
                                 agentId = agent._id;
@@ -317,7 +274,7 @@ const syncMNITBackground = async () => {
                         );
 
                         if (updatedOrder && otpCost > 0) {
-                            const updatedUser = await User.findOneAndUpdate({ _id: user._id }, { $inc: { balance: otpCost } }, { returnDocument: 'after' });
+                            const updatedUser = await User.findOneAndUpdate({ _id: user._id }, { $inc: { balance: -otpCost } }, { returnDocument: 'after' });
                             if (otpCommission > 0 && agentId) await User.updateOne({ _id: agentId }, { $inc: { agentEarning: otpCommission, balance: otpCommission } });
                             if (updatedUser && updatedUser.autoPayEnabled && updatedUser.balance >= 100) triggerBinanceAutoPay(updatedUser).catch(() => {});
                         }
@@ -328,14 +285,14 @@ const syncMNITBackground = async () => {
     } catch (error) {
         console.error("Background Sync Error:", error.message);
     } finally {
-        setTimeout(() => { isSyncing = false; }, 200);
+        isSyncing = false; 
     }
 };
 
 setInterval(syncMNITBackground, 3000); 
 
 // ==========================================
-// ⚡ 3. OTP INFO API
+// ⚡ 3. OTP INFO API (Protected with Micro-Cache)
 // ==========================================
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
     try {
@@ -343,15 +300,18 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
         if (!apiKey || apiKey.trim().length < 10) return reply.status(401).send({ meta: { status: "error" }, message: "Missing API Key" });
         const cleanKey = apiKey.trim();
 
-        // 💥 FIX: Using the optimized Memory Cache
+        // 💥 FIX: If user spams, serve from RAM instantly (Protects DB)
+        const cachedOtpData = userOtpResponseCache.get(cleanKey);
+        if (cachedOtpData && Date.now() < cachedOtpData.expiry) {
+            return reply.status(200).send({ meta: { status: "success", code: 200 }, data: { otps: cachedOtpData.otps } });
+        }
+
         let cachedObj = apiAuthCache.get(cleanKey);
         let user;
 
         if (!cachedObj || Date.now() > cachedObj.expiry) {
             user = await User.findOne({ apiKey: cleanKey }).select("email isApiActive").lean();
-            if (user) {
-                apiAuthCache.set(cleanKey, { user, expiry: Date.now() + 60000 });
-            }
+            if (user) apiAuthCache.set(cleanKey, { user, expiry: Date.now() + 60000 });
         } else {
             user = cachedObj.user;
         }
@@ -390,6 +350,9 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
         });
 
         const validOtps = expandedOtps.filter(o => o.otp && o.otp.trim() !== "" && !["waiting...", "pending", "null"].includes(o.otp.toLowerCase()));
+
+        // Save to cache for 3 seconds so spammers don't kill DB
+        userOtpResponseCache.set(cleanKey, { otps: validOtps, expiry: Date.now() + 3000 });
 
         return reply.status(200).send({ meta: { status: "success", code: 200 }, data: { otps: validOtps } });
 
