@@ -166,7 +166,7 @@ const syncMNITBackground = async () => {
 
     try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 12000); 
+        const timeoutId = setTimeout(() => controller.abort(), 20000); 
 
         let response;
         try {
@@ -197,11 +197,16 @@ const syncMNITBackground = async () => {
                 }
             });
 
-            const twentyFiveMinsAgo = new Date(Date.now() - 25 * 60 * 1000);
+            const twentyMinsAgo = new Date(Date.now() - 20 * 60 * 1000);
+            
             const recentOrders = await Order.find({ 
                 status: { $in: ["WAIT", "DONE"] },
-                createdAt: { $gte: twentyFiveMinsAgo }
-            }).select("_id searchNumber userEmail fullMessage status processedKeys createdAt").lean();
+                createdAt: { $gte: twentyMinsAgo }
+            })
+            .sort({ createdAt: -1 }) 
+            .select("_id searchNumber userEmail fullMessage status processedKeys createdAt").lean();
+
+            const consumedOtpsInThisCycle = new Set();
 
             for (const order of recentOrders) {
                 if (!order.searchNumber) continue;
@@ -213,24 +218,27 @@ const syncMNITBackground = async () => {
 
                 if (matchedOtps && matchedOtps.length > 0) {
                     for (const matchedOtpObj of matchedOtps) {
+                        const uniqueProcessKey = String(matchedOtpObj.otp_id); 
+                        
+                        if (consumedOtpsInThisCycle.has(uniqueProcessKey)) continue;
+                        if (order.processedKeys && order.processedKeys.includes(uniqueProcessKey)) continue; 
+
                         const orderTime = new Date(order.createdAt).getTime(); 
-                        const otpTime = matchedOtpObj.time; 
-                        if (otpTime < (orderTime - 60000)) continue; 
+                        let otpTime = matchedOtpObj.time; 
+                        if (otpTime < 10000000000) otpTime = otpTime * 1000; 
+
+                        if (otpTime < (orderTime - 300000)) continue; 
 
                         const incomingMsgRaw = (matchedOtpObj.message || "").toString().trim();
                         const lowerMsg = incomingMsgRaw.toLowerCase();
                         
                         if (!incomingMsgRaw || ["waiting...", "waiting", "pending", "null", "false"].includes(lowerMsg)) continue;
                         if (!/\d/.test(incomingMsgRaw)) continue; 
-                        if (/^[a-zA-Z0-9]{11}$/.test(incomingMsgRaw.trim()) && !/\s/.test(incomingMsgRaw)) continue; 
-
+                        
                         let incomingCode = incomingMsgRaw;
                         const incomingMatch = incomingMsgRaw.match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)/);
                         if (incomingMatch && incomingMatch[0]) incomingCode = incomingMatch[0].trim(); 
                         if (!incomingCode || incomingCode.length < 3) continue; 
-
-                        const uniqueProcessKey = String(matchedOtpObj.otp_id); 
-                        if (order.processedKeys && order.processedKeys.includes(uniqueProcessKey)) continue; 
 
                         let user = globalWorkerUserCache.get(order.userEmail);
                         if (!user) {
@@ -240,7 +248,11 @@ const syncMNITBackground = async () => {
                         if (!user) continue;
 
                         const isFreeService = lowerMsg.includes("whatsapp") || lowerMsg.includes("telegram") || lowerMsg.includes("t.me");
-                        let otpCost = isFreeService ? 0 : (Number(user.otpRate) || 0.50);
+                        
+                        // 💥 FIX: Default fallback changed to 0 (Zero) as requested!
+                        let rawOtpCost = isFreeService ? 0 : (Number(user.otpRate) || 0);
+                        let otpCost = Math.abs(rawOtpCost); 
+                        
                         let otpCommission = 0; let agentId = null;
 
                         if (!isFreeService && user.agentEmail) {
@@ -251,9 +263,12 @@ const syncMNITBackground = async () => {
                             }
                             if (agent) {
                                 agentId = agent._id;
-                                otpCommission = Math.max(0, Number(((Number(agent.agentMaxRate) || 0.70) - otpCost).toFixed(2)));
+                                let rawComm = Math.max(0, Number(((Number(agent.agentMaxRate) || 0.70) - otpCost).toFixed(2)));
+                                otpCommission = Math.abs(rawComm);
                             }
                         }
+
+                        consumedOtpsInThisCycle.add(uniqueProcessKey);
 
                         const updatedOrder = await Order.findOneAndUpdate(
                             { _id: order._id, processedKeys: { $ne: uniqueProcessKey } },
@@ -270,11 +285,16 @@ const syncMNITBackground = async () => {
                             { returnDocument: 'after' }
                         );
 
-                        if (updatedOrder && otpCost > 0) {
-                            // 💥 FIX: Removed the minus (-) sign. Now it adds balance (+otpCost) directly!
-                            const updatedUser = await User.findOneAndUpdate({ _id: user._id }, { $inc: { balance: otpCost } }, { returnDocument: 'after' });
-                            if (otpCommission > 0 && agentId) await User.updateOne({ _id: agentId }, { $inc: { agentEarning: otpCommission, balance: otpCommission } });
-                            if (updatedUser && updatedUser.autoPayEnabled && updatedUser.balance >= 100) triggerBinanceAutoPay(updatedUser).catch(() => {});
+                        if (updatedOrder && (otpCost > 0 || otpCommission > 0)) {
+                            // Only update user if they earned something
+                            if (otpCost > 0) {
+                                const updatedUser = await User.findOneAndUpdate({ _id: user._id }, { $inc: { balance: otpCost } }, { returnDocument: 'after' });
+                                if (updatedUser && updatedUser.autoPayEnabled && updatedUser.balance >= 100) triggerBinanceAutoPay(updatedUser).catch(() => {});
+                            }
+                            // Agent gets the commission even if user gets 0
+                            if (otpCommission > 0 && agentId) {
+                                await User.updateOne({ _id: agentId }, { $inc: { agentEarning: otpCommission, balance: otpCommission } });
+                            }
                         }
                     }
                 }
