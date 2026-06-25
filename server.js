@@ -156,7 +156,7 @@ fastify.route({
 });
 
 // ==========================================
-// ⚡ 2. BACKGROUND WORKER 
+// ⚡ 2. BACKGROUND WORKER (ULTIMATE SPAM SHIELD)
 // ==========================================
 let isSyncing = false;
 
@@ -176,12 +176,12 @@ const syncMNITBackground = async () => {
                 signal: controller.signal
             });
             clearTimeout(timeoutId);
-        } catch (e) { clearTimeout(timeoutId); return; }
+        } catch (e) { clearTimeout(timeoutId); isSyncing = false; return; }
 
-        if (!response.ok) return; 
+        if (!response.ok) { isSyncing = false; return; }
         
         let mnetData;
-        try { mnetData = await response.json(); } catch(e) { return; }
+        try { mnetData = await response.json(); } catch(e) { isSyncing = false; return; }
         
         let liveOtps = [];
         if (mnetData?.data?.otps && Array.isArray(mnetData.data.otps)) liveOtps = mnetData.data.otps;
@@ -198,7 +198,6 @@ const syncMNITBackground = async () => {
             });
 
             const twentyMinsAgo = new Date(Date.now() - 20 * 60 * 1000);
-            
             const recentOrders = await Order.find({ 
                 status: { $in: ["WAIT", "DONE"] },
                 createdAt: { $gte: twentyMinsAgo }
@@ -207,6 +206,7 @@ const syncMNITBackground = async () => {
             .select("_id searchNumber userEmail fullMessage status processedKeys createdAt").lean();
 
             const consumedOtpsInThisCycle = new Set();
+            const parallelDbTasks = [];
 
             for (const order of recentOrders) {
                 if (!order.searchNumber) continue;
@@ -232,13 +232,21 @@ const syncMNITBackground = async () => {
                         const incomingMsgRaw = (matchedOtpObj.message || "").toString().trim();
                         const lowerMsg = incomingMsgRaw.toLowerCase();
                         
-                        if (!incomingMsgRaw || ["waiting...", "waiting", "pending", "null", "false"].includes(lowerMsg)) continue;
-                        if (!/\d/.test(incomingMsgRaw)) continue; 
+                        // 💥 FIX: ULTIMATE GARBAGE BLOCKER (Includes any variation of "waiting")
+                        if (!incomingMsgRaw || lowerMsg.includes("waiting") || ["pending", "null", "false", "undefined"].includes(lowerMsg)) continue;
                         
-                        let incomingCode = incomingMsgRaw;
+                        // 💥 FIX: THE "MINIMUM 3 DIGITS" WORLD OTP RULE
+                        // Counts total digits in the message. If less than 3, it's 100% fake/spam.
+                        const digitCount = (incomingMsgRaw.match(/\d/g) || []).length;
+                        if (digitCount < 3) continue; 
+                        
+                        let incomingCode = incomingMsgRaw; 
+
+                        // Try to extract exact code to keep it clean, but fallback to raw if weird format
                         const incomingMatch = incomingMsgRaw.match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)/);
-                        if (incomingMatch && incomingMatch[0]) incomingCode = incomingMatch[0].trim(); 
-                        if (!incomingCode || incomingCode.length < 3) continue; 
+                        if (incomingMatch && incomingMatch[0]) {
+                            incomingCode = incomingMatch[0].trim(); 
+                        }
 
                         let user = globalWorkerUserCache.get(order.userEmail);
                         if (!user) {
@@ -249,7 +257,6 @@ const syncMNITBackground = async () => {
 
                         const isFreeService = lowerMsg.includes("whatsapp") || lowerMsg.includes("telegram") || lowerMsg.includes("t.me");
                         
-                        // 💥 FIX: Default fallback changed to 0 (Zero) as requested!
                         let rawOtpCost = isFreeService ? 0 : (Number(user.otpRate) || 0);
                         let otpCost = Math.abs(rawOtpCost); 
                         
@@ -270,34 +277,40 @@ const syncMNITBackground = async () => {
 
                         consumedOtpsInThisCycle.add(uniqueProcessKey);
 
-                        const updatedOrder = await Order.findOneAndUpdate(
-                            { _id: order._id, processedKeys: { $ne: uniqueProcessKey } },
-                            { 
-                                $set: { 
-                                    status: "DONE", 
-                                    otp: incomingCode, 
-                                    fullMessage: order.fullMessage && order.fullMessage !== "Waiting..." ? order.fullMessage + " _||_ " + incomingMsgRaw : incomingMsgRaw,
-                                    expireAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) 
+                        const dbTask = (async () => {
+                            const updatedOrder = await Order.findOneAndUpdate(
+                                { _id: order._id, processedKeys: { $ne: uniqueProcessKey } },
+                                { 
+                                    $set: { 
+                                        status: "DONE", 
+                                        otp: incomingCode, 
+                                        fullMessage: order.fullMessage && order.fullMessage !== "Waiting..." ? order.fullMessage + " _||_ " + incomingMsgRaw : incomingMsgRaw,
+                                        expireAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) 
+                                    },
+                                    $inc: { orderCost: otpCost, orderCommission: otpCommission },
+                                    $addToSet: { processedKeys: uniqueProcessKey } 
                                 },
-                                $inc: { orderCost: otpCost, orderCommission: otpCommission },
-                                $addToSet: { processedKeys: uniqueProcessKey } 
-                            },
-                            { returnDocument: 'after' }
-                        );
+                                { returnDocument: 'after' }
+                            );
 
-                        if (updatedOrder && (otpCost > 0 || otpCommission > 0)) {
-                            // Only update user if they earned something
-                            if (otpCost > 0) {
-                                const updatedUser = await User.findOneAndUpdate({ _id: user._id }, { $inc: { balance: otpCost } }, { returnDocument: 'after' });
-                                if (updatedUser && updatedUser.autoPayEnabled && updatedUser.balance >= 100) triggerBinanceAutoPay(updatedUser).catch(() => {});
+                            if (updatedOrder && (otpCost > 0 || otpCommission > 0)) {
+                                if (otpCost > 0) {
+                                    const updatedUser = await User.findOneAndUpdate({ _id: user._id }, { $inc: { balance: otpCost } }, { returnDocument: 'after' });
+                                    if (updatedUser && updatedUser.autoPayEnabled && updatedUser.balance >= 100) triggerBinanceAutoPay(updatedUser).catch(() => {});
+                                }
+                                if (otpCommission > 0 && agentId) {
+                                    await User.updateOne({ _id: agentId }, { $inc: { agentEarning: otpCommission, balance: otpCommission } });
+                                }
                             }
-                            // Agent gets the commission even if user gets 0
-                            if (otpCommission > 0 && agentId) {
-                                await User.updateOne({ _id: agentId }, { $inc: { agentEarning: otpCommission, balance: otpCommission } });
-                            }
-                        }
+                        })();
+
+                        parallelDbTasks.push(dbTask);
                     }
                 }
+            }
+
+            if (parallelDbTasks.length > 0) {
+                await Promise.allSettled(parallelDbTasks);
             }
         }
     } catch (error) {
@@ -307,7 +320,7 @@ const syncMNITBackground = async () => {
     }
 };
 
-setInterval(syncMNITBackground, 3000); 
+setInterval(syncMNITBackground, 5000); 
 
 // ==========================================
 // ⚡ 3. OTP INFO API
