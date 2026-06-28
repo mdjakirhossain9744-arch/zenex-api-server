@@ -7,7 +7,12 @@ import fastifyCors from '@fastify/cors';
 
 dotenv.config();
 
-const fastify = Fastify({ logger: false });
+// 💥 FIX 1: Fastify Keep-Alive Agent (Prevents 7000+ TIME_WAIT Socket Leaks) 💥
+const fastify = Fastify({ 
+    logger: false,
+    keepAliveTimeout: 30000, 
+    maxRequestsPerSocket: 1000 
+});
 
 fastify.register(fastifyCors, { 
     origin: '*',
@@ -51,7 +56,10 @@ async function triggerBinanceAutoPay(user) {
     try {
         await fetch(`${process.env.MAIN_SITE_URL}/api/cron/process-binance-payout`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 
+                'Content-Type': 'application/json',
+                'Connection': 'keep-alive' 
+            },
             body: JSON.stringify({ userId: user._id })
         });
     } catch (e) {}
@@ -82,7 +90,8 @@ fastify.route({
             }
 
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 20000); 
+            // 💥 FIX: Set to 15s to match your sweet spot logic
+            const timeoutId = setTimeout(() => controller.abort(), 15000); 
             request.raw.on('close', () => { if (request.raw.aborted) controller.abort(); });
 
             const reqData = request.body || request.query || {};
@@ -102,7 +111,8 @@ fastify.route({
                         "mauthapi": REAL_API_KEY, 
                         "Content-Type": "application/json",
                         "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12)", 
-                        "Accept": "application/json"
+                        "Accept": "application/json",
+                        "Connection": "keep-alive"
                     },
                     body: JSON.stringify({ rid }),
                     signal: controller.signal
@@ -166,13 +176,18 @@ const syncMNITBackground = async () => {
 
     try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 20000); 
+        // 💥 FIX 2: 15-SECOND SWEET SPOT (Catches slow OTPs, prevents 19.5s Cloudflare crash) 💥
+        const timeoutId = setTimeout(() => controller.abort(), 15000); 
 
         let response;
         try {
             response = await fetch(`https://api.2oo9.cloud/MXS47FLFX0U/tness/@public/api/success-otp?t=${Date.now()}`, {
                 method: "GET", 
-                headers: { "mauthapi": REAL_API_KEY, "Accept": "application/json" },
+                headers: { 
+                    "mauthapi": REAL_API_KEY, 
+                    "Accept": "application/json",
+                    "Connection": "keep-alive" // Reuses socket connection to provider
+                },
                 signal: controller.signal
             });
             clearTimeout(timeoutId);
@@ -232,17 +247,13 @@ const syncMNITBackground = async () => {
                         const incomingMsgRaw = (matchedOtpObj.message || "").toString().trim();
                         const lowerMsg = incomingMsgRaw.toLowerCase();
                         
-                        // 💥 FIX: ULTIMATE GARBAGE BLOCKER (Includes any variation of "waiting")
                         if (!incomingMsgRaw || lowerMsg.includes("waiting") || ["pending", "null", "false", "undefined"].includes(lowerMsg)) continue;
                         
-                        // 💥 FIX: THE "MINIMUM 3 DIGITS" WORLD OTP RULE
-                        // Counts total digits in the message. If less than 3, it's 100% fake/spam.
                         const digitCount = (incomingMsgRaw.match(/\d/g) || []).length;
                         if (digitCount < 3) continue; 
                         
                         let incomingCode = incomingMsgRaw; 
 
-                        // Try to extract exact code to keep it clean, but fallback to raw if weird format
                         const incomingMatch = incomingMsgRaw.match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)/);
                         if (incomingMatch && incomingMatch[0]) {
                             incomingCode = incomingMatch[0].trim(); 
