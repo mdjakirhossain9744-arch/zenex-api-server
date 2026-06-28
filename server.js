@@ -7,12 +7,8 @@ import fastifyCors from '@fastify/cors';
 
 dotenv.config();
 
-// 💥 FIX 1: Fastify Keep-Alive Agent (Prevents 7000+ TIME_WAIT Socket Leaks) 💥
-const fastify = Fastify({ 
-    logger: false,
-    keepAliveTimeout: 30000, 
-    maxRequestsPerSocket: 1000 
-});
+// 💥 একদম অরিজিনাল Fastify (কোনো ফালতু Keep-Alive নেই) 💥
+const fastify = Fastify({ logger: false });
 
 fastify.register(fastifyCors, { 
     origin: '*',
@@ -56,10 +52,7 @@ async function triggerBinanceAutoPay(user) {
     try {
         await fetch(`${process.env.MAIN_SITE_URL}/api/cron/process-binance-payout`, {
             method: 'POST',
-            headers: { 
-                'Content-Type': 'application/json',
-                'Connection': 'keep-alive' 
-            },
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ userId: user._id })
         });
     } catch (e) {}
@@ -90,7 +83,7 @@ fastify.route({
             }
 
             const controller = new AbortController();
-            // 💥 FIX: Set to 15s to match your sweet spot logic
+            // 💥 FIX: শুধুমাত্র ২০ সেকেন্ডকে ১৫ সেকেন্ড করা হয়েছে 💥
             const timeoutId = setTimeout(() => controller.abort(), 15000); 
             request.raw.on('close', () => { if (request.raw.aborted) controller.abort(); });
 
@@ -111,8 +104,7 @@ fastify.route({
                         "mauthapi": REAL_API_KEY, 
                         "Content-Type": "application/json",
                         "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12)", 
-                        "Accept": "application/json",
-                        "Connection": "keep-alive"
+                        "Accept": "application/json"
                     },
                     body: JSON.stringify({ rid }),
                     signal: controller.signal
@@ -176,18 +168,14 @@ const syncMNITBackground = async () => {
 
     try {
         const controller = new AbortController();
-        // 💥 FIX 2: 15-SECOND SWEET SPOT (Catches slow OTPs, prevents 19.5s Cloudflare crash) 💥
+        // 💥 FIX: শুধুমাত্র ২০ সেকেন্ডকে ১৫ সেকেন্ড করা হয়েছে 💥
         const timeoutId = setTimeout(() => controller.abort(), 15000); 
 
         let response;
         try {
             response = await fetch(`https://api.2oo9.cloud/MXS47FLFX0U/tness/@public/api/success-otp?t=${Date.now()}`, {
                 method: "GET", 
-                headers: { 
-                    "mauthapi": REAL_API_KEY, 
-                    "Accept": "application/json",
-                    "Connection": "keep-alive" // Reuses socket connection to provider
-                },
+                headers: { "mauthapi": REAL_API_KEY, "Accept": "application/json" },
                 signal: controller.signal
             });
             clearTimeout(timeoutId);
