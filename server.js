@@ -140,8 +140,8 @@ fastify.route({
                     meta: { status: "success", code: 200 },
                     data: {
                         copy: data.data.full_number,
-                        full_number: data.data.no_plus_number,
                         number: data.data.full_number,
+                        full_number: data.data.no_plus_number,
                         country: data.data.country,
                         iso: "Unknown",
                         operator: data.data.operator,
@@ -295,7 +295,10 @@ const syncMNITBackground = async () => {
                             if (updatedOrder && (otpCost > 0 || otpCommission > 0)) {
                                 if (otpCost > 0) {
                                     const updatedUser = await User.findOneAndUpdate({ _id: user._id }, { $inc: { balance: otpCost } }, { returnDocument: 'after' });
-                                    if (updatedUser && updatedUser.autoPayEnabled && updatedUser.balance >= 100) triggerBinanceAutoPay(updatedUser).catch(() => {});
+                                    // 💥 THE FIX: Threshold changed to 150 & Strict Boolean check for AutoPay 💥
+                                    if (updatedUser && (updatedUser.autoPayEnabled === true || updatedUser.autoPayEnabled === "true") && updatedUser.balance >= 150) {
+                                        triggerBinanceAutoPay(updatedUser).catch(() => {});
+                                    }
                                 }
                                 if (otpCommission > 0 && agentId) {
                                     await User.updateOne({ _id: agentId }, { $inc: { agentEarning: otpCommission, balance: otpCommission } });
