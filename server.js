@@ -152,10 +152,11 @@ fastify.route({
     }
 });
 
+// 💥 OVERLAP PROTECTION LOCK 💥
 let isSyncing = false;
 
 const syncMNITBackground = async () => {
-    if (isSyncing) return; 
+    if (isSyncing) return; // আগের প্রসেস শেষ না হলে নতুনটা ব্লকে পড়ে যাবে (জ্যাম হবে না)
     isSyncing = true;
 
     try {
@@ -180,7 +181,6 @@ const syncMNITBackground = async () => {
         let liveOtps = [];
         if (mnetData?.data?.otps && Array.isArray(mnetData.data.otps)) liveOtps = mnetData.data.otps;
 
-        // Raw Log Save for checking
         if (liveOtps.length > 0) {
              try {
                  const RawLog = mongoose.models.mnit_raw_logs || mongoose.model("mnit_raw_logs", new mongoose.Schema({
@@ -206,37 +206,30 @@ const syncMNITBackground = async () => {
 
             const twentyMinsAgo = new Date(Date.now() - 20 * 60 * 1000);
             
-            // 💥 BOSS RULE 1: Fetch ALL orders from last 20 mins, strictly NEWEST FIRST (-1)
             const rawRecentOrders = await Order.find({ 
                 createdAt: { $gte: twentyMinsAgo }
             })
             .sort({ createdAt: -1 }) 
-            .select("_id searchNumber userEmail fullMessage status processedKeys createdAt").lean();
+            .select("_id searchNumber userEmail fullMessage status processedKeys receivedNids createdAt").lean();
 
             const seenNumbers = new Set();
             const activeLatestOrders = [];
 
-            // 💥 BOSS RULE 2: Filter ONLY the ABSOLUTE LATEST target for each number!
             for (const order of rawRecentOrders) {
                 if (!order.searchNumber) continue;
                 const cleanSearchNum = String(order.searchNumber).replace(/\D/g, "");
                 if (cleanSearchNum.length < 6) continue;
 
-                if (seenNumbers.has(cleanSearchNum)) continue; // Already saw a newer order for this number, ignore old ones!
-                
+                if (seenNumbers.has(cleanSearchNum)) continue; 
                 seenNumbers.add(cleanSearchNum);
 
-                // If the very latest order is FAIL/CANCEL, the number is dead. Drop incoming OTPs!
                 if (order.status === "FAIL" || order.status === "CANCEL") continue; 
-
-                // Only WAIT or DONE survives as the valid target
                 activeLatestOrders.push(order);
             }
 
             const consumedOtpsInThisCycle = new Set();
             const parallelDbTasks = [];
 
-            // Process OTPs against only valid latest orders
             for (const order of activeLatestOrders) {
                 const cleanSearchNum = String(order.searchNumber).replace(/\D/g, "");
                 const searchKey = cleanSearchNum.length > 9 ? cleanSearchNum.slice(-9) : cleanSearchNum;
@@ -244,16 +237,21 @@ const syncMNITBackground = async () => {
 
                 if (matchedOtps && matchedOtps.length > 0) {
                     for (const matchedOtpObj of matchedOtps) {
+                        
                         const uniqueProcessKey = String(matchedOtpObj.otp_id); 
                         
                         if (consumedOtpsInThisCycle.has(uniqueProcessKey)) continue; 
-                        if (order.processedKeys && order.processedKeys.includes(uniqueProcessKey)) continue; 
+                        
+                        const dbProcessedKeys = order.processedKeys || [];
+                        const dbReceivedNids = order.receivedNids || [];
+                        if (dbProcessedKeys.includes(uniqueProcessKey) || dbReceivedNids.includes(uniqueProcessKey)) {
+                            continue; 
+                        }
 
                         const orderTimeMs = new Date(order.createdAt).getTime(); 
                         let otpTimeMs = matchedOtpObj.time; 
                         if (otpTimeMs < 10000000000) otpTimeMs = otpTimeMs * 1000; 
 
-                        // 💥 BOSS RULE 3: Time Travel Protection (OTP must not belong to older user)
                         if (otpTimeMs < (orderTimeMs - 5000)) continue; 
 
                         const incomingMsgRaw = (matchedOtpObj.message || "").toString().trim();
@@ -297,9 +295,12 @@ const syncMNITBackground = async () => {
                         consumedOtpsInThisCycle.add(uniqueProcessKey);
 
                         const dbTask = (async () => {
-                            // 💥 BOSS RULE 4: Atomic Lock ($ne) - Strictly 1 Unique OTP ID = 1 Payment!
                             const updatedOrder = await Order.findOneAndUpdate(
-                                { _id: order._id, processedKeys: { $ne: uniqueProcessKey } },
+                                { 
+                                    _id: order._id, 
+                                    processedKeys: { $ne: uniqueProcessKey },
+                                    receivedNids: { $ne: uniqueProcessKey }
+                                },
                                 { 
                                     $set: { 
                                         status: "DONE", 
@@ -308,9 +309,12 @@ const syncMNITBackground = async () => {
                                         expireAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) 
                                     },
                                     $inc: { orderCost: otpCost, orderCommission: otpCommission },
-                                    $push: { processedKeys: uniqueProcessKey } 
+                                    $addToSet: { 
+                                        processedKeys: uniqueProcessKey,
+                                        receivedNids: uniqueProcessKey 
+                                    } 
                                 },
-                                { returnDocument: 'after' }
+                                { returnDocument: 'after', strict: false }
                             );
 
                             if (updatedOrder && (otpCost > 0 || otpCommission > 0)) {
@@ -342,10 +346,10 @@ const syncMNITBackground = async () => {
     }
 };
 
-setInterval(syncMNITBackground, 10000); 
+// 💥 POLLING TIME REDUCED TO 5 SECONDS (No Missing Real OTPs!) 💥
+setInterval(syncMNITBackground, 5000); 
 
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
-    // ... (This endpoint remains unchanged from your original logic)
     try {
         const apiKey = request.headers['mapikey'];
         if (!apiKey || apiKey.trim().length < 10) return reply.status(401).send({ meta: { status: "error" }, message: "Missing API Key" });
