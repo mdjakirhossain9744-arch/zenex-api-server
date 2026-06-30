@@ -7,7 +7,6 @@ import fastifyCors from '@fastify/cors';
 
 dotenv.config();
 
-// 💥 একদম অরিজিনাল Fastify (কোনো ফালতু Keep-Alive নেই) 💥
 const fastify = Fastify({ logger: false });
 
 fastify.register(fastifyCors, { 
@@ -58,9 +57,6 @@ async function triggerBinanceAutoPay(user) {
     } catch (e) {}
 }
 
-// ==========================================
-// 🚀 1. GET NUMBER API 
-// ==========================================
 fastify.route({
     method: ['GET', 'POST'], 
     url: '/v1/getnum',
@@ -83,7 +79,6 @@ fastify.route({
             }
 
             const controller = new AbortController();
-            // 💥 FIX: শুধুমাত্র ২০ সেকেন্ডকে ১৫ সেকেন্ড করা হয়েছে 💥
             const timeoutId = setTimeout(() => controller.abort(), 15000); 
             request.raw.on('close', () => { if (request.raw.aborted) controller.abort(); });
 
@@ -157,9 +152,6 @@ fastify.route({
     }
 });
 
-// ==========================================
-// ⚡ 2. BACKGROUND WORKER (ULTIMATE SPAM SHIELD)
-// ==========================================
 let isSyncing = false;
 
 const syncMNITBackground = async () => {
@@ -168,7 +160,6 @@ const syncMNITBackground = async () => {
 
     try {
         const controller = new AbortController();
-        // 💥 FIX: শুধুমাত্র ২০ সেকেন্ডকে ১৫ সেকেন্ড করা হয়েছে 💥
         const timeoutId = setTimeout(() => controller.abort(), 15000); 
 
         let response;
@@ -188,6 +179,25 @@ const syncMNITBackground = async () => {
         
         let liveOtps = [];
         if (mnetData?.data?.otps && Array.isArray(mnetData.data.otps)) liveOtps = mnetData.data.otps;
+
+        // 💥 THE X-RAY FIX: LOG THE RAW PROVIDER PAYLOAD SO BOSS CAN SEE IT IN CHECK-RAW 💥
+        if (liveOtps.length > 0) {
+             try {
+                 const RawLog = mongoose.models.mnit_raw_logs || mongoose.model("mnit_raw_logs", new mongoose.Schema({
+                     timestamp: { type: Date, default: Date.now },
+                     rawPayload: { type: Object }
+                 }, { strict: false }));
+                 
+                 // Save the EXACT provider response to the DB for transparency!
+                 await RawLog.create({
+                     rawPayload: {
+                         source: "FASTIFY_WORKER_DIRECT_PROVIDER_PULL",
+                         totalOtpsFetched: liveOtps.length,
+                         providerData: liveOtps
+                     }
+                 });
+             } catch (logErr) {}
+        }
 
         if (liveOtps.length > 0) {
             const otpGroups = {};
@@ -237,6 +247,11 @@ const syncMNITBackground = async () => {
                         
                         if (!incomingMsgRaw || lowerMsg.includes("waiting") || ["pending", "null", "false", "undefined"].includes(lowerMsg)) continue;
                         
+                        // 💥 STRICT DUPLICATE TEXT BLOCK ADDED HERE 💥
+                        if (order.fullMessage && order.fullMessage.includes(incomingMsgRaw)) {
+                            continue; // Provider glitch block! Drop it immediately!
+                        }
+
                         const digitCount = (incomingMsgRaw.match(/\d/g) || []).length;
                         if (digitCount < 3) continue; 
                         
@@ -295,7 +310,6 @@ const syncMNITBackground = async () => {
                             if (updatedOrder && (otpCost > 0 || otpCommission > 0)) {
                                 if (otpCost > 0) {
                                     const updatedUser = await User.findOneAndUpdate({ _id: user._id }, { $inc: { balance: otpCost } }, { returnDocument: 'after' });
-                                    // 💥 THE FIX: Threshold changed to 150 & Strict Boolean check for AutoPay 💥
                                     if (updatedUser && (updatedUser.autoPayEnabled === true || updatedUser.autoPayEnabled === "true") && updatedUser.balance >= 150) {
                                         triggerBinanceAutoPay(updatedUser).catch(() => {});
                                     }
@@ -322,11 +336,8 @@ const syncMNITBackground = async () => {
     }
 };
 
-setInterval(syncMNITBackground, 5000); 
+setInterval(syncMNITBackground, 10000); 
 
-// ==========================================
-// ⚡ 3. OTP INFO API
-// ==========================================
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
     try {
         const apiKey = request.headers['mapikey'];
@@ -390,9 +401,6 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
     } catch (error) { return reply.status(500).send({ meta: { status: "error" } }); }
 });
 
-// ==========================================
-// 🌍 4. ACTIVE RANGES API
-// ==========================================
 const extractServiceName = (msg) => {
     if (!msg) return "Other";
     const lowerMsg = msg.toLowerCase();
@@ -449,9 +457,6 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
     } catch (error) { return reply.status(500).send({ success: false, message: "Server Error" }); }
 });
 
-// ==========================================
-// 📋 5. TODAY OTPs API 
-// ==========================================
 fastify.get('/v1/user/today-otps', async (request, reply) => {
     try {
         const apiKey = request.headers['mapikey'];
