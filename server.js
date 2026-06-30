@@ -180,21 +180,15 @@ const syncMNITBackground = async () => {
         let liveOtps = [];
         if (mnetData?.data?.otps && Array.isArray(mnetData.data.otps)) liveOtps = mnetData.data.otps;
 
-        // 💥 THE X-RAY FIX: LOG THE RAW PROVIDER PAYLOAD SO BOSS CAN SEE IT IN CHECK-RAW 💥
+        // Raw Log Save for checking
         if (liveOtps.length > 0) {
              try {
                  const RawLog = mongoose.models.mnit_raw_logs || mongoose.model("mnit_raw_logs", new mongoose.Schema({
                      timestamp: { type: Date, default: Date.now },
                      rawPayload: { type: Object }
                  }, { strict: false }));
-                 
-                 // Save the EXACT provider response to the DB for transparency!
                  await RawLog.create({
-                     rawPayload: {
-                         source: "FASTIFY_WORKER_DIRECT_PROVIDER_PULL",
-                         totalOtpsFetched: liveOtps.length,
-                         providerData: liveOtps
-                     }
+                     rawPayload: { source: "FASTIFY_WORKER_DIRECT_PROVIDER_PULL", totalOtpsFetched: liveOtps.length, providerData: liveOtps }
                  });
              } catch (logErr) {}
         }
@@ -211,21 +205,40 @@ const syncMNITBackground = async () => {
             });
 
             const twentyMinsAgo = new Date(Date.now() - 20 * 60 * 1000);
-            const recentOrders = await Order.find({ 
-                status: { $in: ["WAIT", "DONE"] },
+            
+            // 💥 BOSS RULE 1: Fetch ALL orders from last 20 mins, strictly NEWEST FIRST (-1)
+            const rawRecentOrders = await Order.find({ 
                 createdAt: { $gte: twentyMinsAgo }
             })
             .sort({ createdAt: -1 }) 
             .select("_id searchNumber userEmail fullMessage status processedKeys createdAt").lean();
 
-            const consumedOtpsInThisCycle = new Set();
-            const parallelDbTasks = [];
+            const seenNumbers = new Set();
+            const activeLatestOrders = [];
 
-            for (const order of recentOrders) {
+            // 💥 BOSS RULE 2: Filter ONLY the ABSOLUTE LATEST target for each number!
+            for (const order of rawRecentOrders) {
                 if (!order.searchNumber) continue;
                 const cleanSearchNum = String(order.searchNumber).replace(/\D/g, "");
                 if (cleanSearchNum.length < 6) continue;
+
+                if (seenNumbers.has(cleanSearchNum)) continue; // Already saw a newer order for this number, ignore old ones!
                 
+                seenNumbers.add(cleanSearchNum);
+
+                // If the very latest order is FAIL/CANCEL, the number is dead. Drop incoming OTPs!
+                if (order.status === "FAIL" || order.status === "CANCEL") continue; 
+
+                // Only WAIT or DONE survives as the valid target
+                activeLatestOrders.push(order);
+            }
+
+            const consumedOtpsInThisCycle = new Set();
+            const parallelDbTasks = [];
+
+            // Process OTPs against only valid latest orders
+            for (const order of activeLatestOrders) {
+                const cleanSearchNum = String(order.searchNumber).replace(/\D/g, "");
                 const searchKey = cleanSearchNum.length > 9 ? cleanSearchNum.slice(-9) : cleanSearchNum;
                 const matchedOtps = otpGroups[searchKey]; 
 
@@ -233,30 +246,24 @@ const syncMNITBackground = async () => {
                     for (const matchedOtpObj of matchedOtps) {
                         const uniqueProcessKey = String(matchedOtpObj.otp_id); 
                         
-                        if (consumedOtpsInThisCycle.has(uniqueProcessKey)) continue;
+                        if (consumedOtpsInThisCycle.has(uniqueProcessKey)) continue; 
                         if (order.processedKeys && order.processedKeys.includes(uniqueProcessKey)) continue; 
 
-                        const orderTime = new Date(order.createdAt).getTime(); 
-                        let otpTime = matchedOtpObj.time; 
-                        if (otpTime < 10000000000) otpTime = otpTime * 1000; 
+                        const orderTimeMs = new Date(order.createdAt).getTime(); 
+                        let otpTimeMs = matchedOtpObj.time; 
+                        if (otpTimeMs < 10000000000) otpTimeMs = otpTimeMs * 1000; 
 
-                        if (otpTime < (orderTime - 300000)) continue; 
+                        // 💥 BOSS RULE 3: Time Travel Protection (OTP must not belong to older user)
+                        if (otpTimeMs < (orderTimeMs - 5000)) continue; 
 
                         const incomingMsgRaw = (matchedOtpObj.message || "").toString().trim();
                         const lowerMsg = incomingMsgRaw.toLowerCase();
-                        
                         if (!incomingMsgRaw || lowerMsg.includes("waiting") || ["pending", "null", "false", "undefined"].includes(lowerMsg)) continue;
                         
-                        // 💥 STRICT DUPLICATE TEXT BLOCK ADDED HERE 💥
-                        if (order.fullMessage && order.fullMessage.includes(incomingMsgRaw)) {
-                            continue; // Provider glitch block! Drop it immediately!
-                        }
-
                         const digitCount = (incomingMsgRaw.match(/\d/g) || []).length;
                         if (digitCount < 3) continue; 
                         
                         let incomingCode = incomingMsgRaw; 
-
                         const incomingMatch = incomingMsgRaw.match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)/);
                         if (incomingMatch && incomingMatch[0]) {
                             incomingCode = incomingMatch[0].trim(); 
@@ -270,12 +277,10 @@ const syncMNITBackground = async () => {
                         if (!user) continue;
 
                         const isFreeService = lowerMsg.includes("whatsapp") || lowerMsg.includes("telegram") || lowerMsg.includes("t.me");
-                        
                         let rawOtpCost = isFreeService ? 0 : (Number(user.otpRate) || 0);
                         let otpCost = Math.abs(rawOtpCost); 
                         
                         let otpCommission = 0; let agentId = null;
-
                         if (!isFreeService && user.agentEmail) {
                             let agent = globalWorkerUserCache.get(user.agentEmail);
                             if (!agent) {
@@ -292,6 +297,7 @@ const syncMNITBackground = async () => {
                         consumedOtpsInThisCycle.add(uniqueProcessKey);
 
                         const dbTask = (async () => {
+                            // 💥 BOSS RULE 4: Atomic Lock ($ne) - Strictly 1 Unique OTP ID = 1 Payment!
                             const updatedOrder = await Order.findOneAndUpdate(
                                 { _id: order._id, processedKeys: { $ne: uniqueProcessKey } },
                                 { 
@@ -302,7 +308,7 @@ const syncMNITBackground = async () => {
                                         expireAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) 
                                     },
                                     $inc: { orderCost: otpCost, orderCommission: otpCommission },
-                                    $addToSet: { processedKeys: uniqueProcessKey } 
+                                    $push: { processedKeys: uniqueProcessKey } 
                                 },
                                 { returnDocument: 'after' }
                             );
@@ -339,6 +345,7 @@ const syncMNITBackground = async () => {
 setInterval(syncMNITBackground, 10000); 
 
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
+    // ... (This endpoint remains unchanged from your original logic)
     try {
         const apiKey = request.headers['mapikey'];
         if (!apiKey || apiKey.trim().length < 10) return reply.status(401).send({ meta: { status: "error" }, message: "Missing API Key" });
@@ -367,18 +374,13 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
             userEmail: user.email,
             status: "DONE", 
             updatedAt: { $gte: twentyMinutesAgo }
-        })
-        .select("_id displayNumber searchNumber otp fullMessage country operator updatedAt createdAt status")
-        .sort({ updatedAt: -1 })
-        .lean();
+        }).select("_id displayNumber searchNumber otp fullMessage country operator updatedAt createdAt status").sort({ updatedAt: -1 }).lean();
 
         let expandedOtps = [];
-
         recentOrders.forEach(order => {
             const d = new Date(order.updatedAt || order.createdAt);
             const pad = (n) => n.toString().padStart(2, '0');
             const formattedDate = `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
-            
             const numberClean = String(order.displayNumber || order.searchNumber || "").replace(/\D/g, "");
             const baseNid = "ZX_" + order._id.toString().substring(0, 10).toUpperCase();
 
@@ -393,9 +395,7 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
         });
 
         const validOtps = expandedOtps.filter(o => o.otp && o.otp.trim() !== "" && !["waiting...", "pending", "null"].includes(o.otp.toLowerCase()));
-
         userOtpResponseCache.set(cleanKey, { otps: validOtps, expiry: Date.now() + 3000 });
-
         return reply.status(200).send({ meta: { status: "success", code: 200 }, data: { otps: validOtps } });
 
     } catch (error) { return reply.status(500).send({ meta: { status: "error" } }); }
