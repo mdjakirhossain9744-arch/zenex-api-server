@@ -29,7 +29,10 @@ const connectDB = async () => {
 };
 
 const getUTCDateString = (dateObj = new Date()) => new Date(dateObj).toISOString().split('T')[0];
-const REAL_API_KEY = process.env.MAIN_PROVIDER_API_KEY || "MK2447V3313"; 
+
+// 🔥 THE NEW OFFICIAL API SETUP 🔥
+const REAL_API_KEY = "MBHLD9GWNSN"; 
+const BASE_API_URL = "https://api.2oo9.cloud/MXS47FLFX0U/tnemn/@public/api";
 
 const apiAuthCache = new Map();
 const globalWorkerUserCache = new Map(); 
@@ -57,6 +60,9 @@ async function triggerBinanceAutoPay(user) {
     } catch (e) {}
 }
 
+// ==========================================
+// 1. GET NUMBER ENDPOINT (Offical POST Setup)
+// ==========================================
 fastify.route({
     method: ['GET', 'POST'], 
     url: '/v1/getnum',
@@ -93,12 +99,11 @@ fastify.route({
 
             let response;
             try {
-                response = await fetch("https://api.2oo9.cloud/MXS47FLFX0U/tness/@public/api/getnum", {
+                response = await fetch(`${BASE_API_URL}/getnum`, {
                     method: "POST",
                     headers: { 
                         "mauthapi": REAL_API_KEY, 
                         "Content-Type": "application/json",
-                        "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12)", 
                         "Accept": "application/json"
                     },
                     body: JSON.stringify({ rid }),
@@ -115,6 +120,8 @@ fastify.route({
 
             if (data.meta?.code === 200 && data.data) {
                 const todayStr = getUTCDateString();
+                
+                // Save Order Immediately
                 setImmediate(() => {
                     const newOrder = new Order({
                         userEmail: user.email,
@@ -152,11 +159,13 @@ fastify.route({
     }
 });
 
-// 💥 OVERLAP PROTECTION LOCK 💥
+// ==========================================
+// 2. BACKGROUND OTP SYNC (Smart Trust Engine)
+// ==========================================
 let isSyncing = false;
 
 const syncMNITBackground = async () => {
-    if (isSyncing) return; // আগের প্রসেস শেষ না হলে নতুনটা ব্লকে পড়ে যাবে (জ্যাম হবে না)
+    if (isSyncing) return; 
     isSyncing = true;
 
     try {
@@ -165,7 +174,7 @@ const syncMNITBackground = async () => {
 
         let response;
         try {
-            response = await fetch(`https://api.2oo9.cloud/MXS47FLFX0U/tness/@public/api/success-otp?t=${Date.now()}`, {
+            response = await fetch(`${BASE_API_URL}/success-otp?t=${Date.now()}`, {
                 method: "GET", 
                 headers: { "mauthapi": REAL_API_KEY, "Accept": "application/json" },
                 signal: controller.signal
@@ -175,23 +184,11 @@ const syncMNITBackground = async () => {
 
         if (!response.ok) { isSyncing = false; return; }
         
-        let mnetData;
-        try { mnetData = await response.json(); } catch(e) { isSyncing = false; return; }
+        let providerData;
+        try { providerData = await response.json(); } catch(e) { isSyncing = false; return; }
         
         let liveOtps = [];
-        if (mnetData?.data?.otps && Array.isArray(mnetData.data.otps)) liveOtps = mnetData.data.otps;
-
-        if (liveOtps.length > 0) {
-             try {
-                 const RawLog = mongoose.models.mnit_raw_logs || mongoose.model("mnit_raw_logs", new mongoose.Schema({
-                     timestamp: { type: Date, default: Date.now },
-                     rawPayload: { type: Object }
-                 }, { strict: false }));
-                 await RawLog.create({
-                     rawPayload: { source: "FASTIFY_WORKER_DIRECT_PROVIDER_PULL", totalOtpsFetched: liveOtps.length, providerData: liveOtps }
-                 });
-             } catch (logErr) {}
-        }
+        if (providerData?.data?.otps && Array.isArray(providerData.data.otps)) liveOtps = providerData.data.otps;
 
         if (liveOtps.length > 0) {
             const otpGroups = {};
@@ -212,8 +209,8 @@ const syncMNITBackground = async () => {
             .sort({ createdAt: -1 }) 
             .select("_id searchNumber userEmail fullMessage status processedKeys receivedNids createdAt").lean();
 
-            const seenNumbers = new Set();
             const activeLatestOrders = [];
+            const seenNumbers = new Set();
 
             for (const order of rawRecentOrders) {
                 if (!order.searchNumber) continue;
@@ -252,6 +249,7 @@ const syncMNITBackground = async () => {
                         let otpTimeMs = matchedOtpObj.time; 
                         if (otpTimeMs < 10000000000) otpTimeMs = otpTimeMs * 1000; 
 
+                        // 💥 NUMBER RECYCLING BLOCK 💥
                         if (otpTimeMs < (orderTimeMs - 5000)) continue; 
 
                         const incomingMsgRaw = (matchedOtpObj.message || "").toString().trim();
@@ -294,12 +292,12 @@ const syncMNITBackground = async () => {
 
                         consumedOtpsInThisCycle.add(uniqueProcessKey);
 
+                        // 💥 ATOMIC LOCK PAYMENT LOGIC 💥
                         const dbTask = (async () => {
                             const updatedOrder = await Order.findOneAndUpdate(
                                 { 
                                     _id: order._id, 
-                                    processedKeys: { $ne: uniqueProcessKey },
-                                    receivedNids: { $ne: uniqueProcessKey }
+                                    processedKeys: { $ne: uniqueProcessKey }
                                 },
                                 { 
                                     $set: { 
@@ -309,10 +307,7 @@ const syncMNITBackground = async () => {
                                         expireAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) 
                                     },
                                     $inc: { orderCost: otpCost, orderCommission: otpCommission },
-                                    $addToSet: { 
-                                        processedKeys: uniqueProcessKey,
-                                        receivedNids: uniqueProcessKey 
-                                    } 
+                                    $addToSet: { processedKeys: uniqueProcessKey, receivedNids: uniqueProcessKey } 
                                 },
                                 { returnDocument: 'after', strict: false }
                             );
@@ -346,9 +341,12 @@ const syncMNITBackground = async () => {
     }
 };
 
-// 💥 POLLING TIME REDUCED TO 5 SECONDS (No Missing Real OTPs!) 💥
+// Polling every 5 seconds according to API cache rule
 setInterval(syncMNITBackground, 5000); 
 
+// ==========================================
+// USER API ENDPOINTS
+// ==========================================
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
     try {
         const apiKey = request.headers['mapikey'];
@@ -489,7 +487,7 @@ const startServer = async () => {
     try {
         await connectDB();
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V4 is LIVE at: http://localhost:${process.env.PORT || 4000}`);
+        console.log(`⚡ ZENEX Microservice OFFICIAL V5 is LIVE at: http://localhost:${process.env.PORT || 4000}`);
     } catch (err) { process.exit(1); }
 };
 startServer();
