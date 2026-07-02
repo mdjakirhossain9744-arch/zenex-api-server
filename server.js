@@ -85,7 +85,7 @@ fastify.route({
             }
 
             const controller = new AbortController();
-            // 💥 FAIL-FAST ARCHITECTURE: 10 Seconds max. Frees RAM and prevents Server Crash! 💥
+            // 💥 FAIL-FAST: 10s to prevent server load during Number Fetch
             const timeoutId = setTimeout(() => controller.abort(), 10000); 
             request.raw.on('close', () => { if (request.raw.aborted) controller.abort(); });
 
@@ -122,7 +122,6 @@ fastify.route({
             if (data.meta?.code === 200 && data.data) {
                 const todayStr = getUTCDateString();
                 
-                // Save Order Immediately
                 setImmediate(() => {
                     const newOrder = new Order({
                         userEmail: user.email,
@@ -171,7 +170,7 @@ const syncMNITBackground = async () => {
 
     try {
         const controller = new AbortController();
-        // 💥 Safe Abort: 15 Secs max. If provider hangs, it aborts but next 5s poll catches ALL missed OTPs. 💥
+        // 💥 FAIL-FAST OTP SYNC: 15 Seconds safely (Prevents server hang). Missed OTPs will come in the next poll! 💥
         const timeoutId = setTimeout(() => controller.abort(), 15000); 
 
         let response;
@@ -251,8 +250,8 @@ const syncMNITBackground = async () => {
                         let otpTimeMs = matchedOtpObj.time; 
                         if (otpTimeMs < 10000000000) otpTimeMs = otpTimeMs * 1000; 
 
-                        // 💥 NUMBER RECYCLING BLOCK 💥
-                        if (otpTimeMs < (orderTimeMs - 5000)) continue; 
+                        // 💥 TIME SKEW BUFFER: 2 Minutes safely prevents real OTPs from being rejected 💥
+                        if (otpTimeMs < (orderTimeMs - 120000)) continue; 
 
                         const incomingMsgRaw = (matchedOtpObj.message || "").toString().trim();
                         const lowerMsg = incomingMsgRaw.toLowerCase();
@@ -294,7 +293,6 @@ const syncMNITBackground = async () => {
 
                         consumedOtpsInThisCycle.add(uniqueProcessKey);
 
-                        // 💥 ATOMIC LOCK PAYMENT LOGIC 💥
                         const dbTask = (async () => {
                             const updatedOrder = await Order.findOneAndUpdate(
                                 { 
@@ -339,12 +337,10 @@ const syncMNITBackground = async () => {
     } catch (error) {
         console.error("Background Sync Error:", error.message);
     } finally {
-        // 💥 100% PREVENTS OTP HANGING. System resets and fetches on next 5s poll. 💥
         isSyncing = false; 
     }
 };
 
-// Polling every 5 seconds according to API cache rule
 setInterval(syncMNITBackground, 5000); 
 
 // ==========================================
@@ -490,7 +486,7 @@ const startServer = async () => {
     try {
         await connectDB();
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice OFFICIAL V5 is LIVE at: http://localhost:${process.env.PORT || 4000}`);
+        console.log(`⚡ ZENEX Microservice OFFICIAL V6 (Zero-Miss Setup) is LIVE at: http://localhost:${process.env.PORT || 4000}`);
     } catch (err) { process.exit(1); }
 };
 startServer();
