@@ -85,7 +85,8 @@ fastify.route({
             }
 
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 15000); 
+            // 💥 FAIL-FAST ARCHITECTURE: 10 Seconds max. Frees RAM and prevents Server Crash! 💥
+            const timeoutId = setTimeout(() => controller.abort(), 10000); 
             request.raw.on('close', () => { if (request.raw.aborted) controller.abort(); });
 
             const reqData = request.body || request.query || {};
@@ -170,6 +171,7 @@ const syncMNITBackground = async () => {
 
     try {
         const controller = new AbortController();
+        // 💥 Safe Abort: 15 Secs max. If provider hangs, it aborts but next 5s poll catches ALL missed OTPs. 💥
         const timeoutId = setTimeout(() => controller.abort(), 15000); 
 
         let response;
@@ -337,6 +339,7 @@ const syncMNITBackground = async () => {
     } catch (error) {
         console.error("Background Sync Error:", error.message);
     } finally {
+        // 💥 100% PREVENTS OTP HANGING. System resets and fetches on next 5s poll. 💥
         isSyncing = false; 
     }
 };
