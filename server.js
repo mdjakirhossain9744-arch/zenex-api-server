@@ -61,7 +61,7 @@ async function triggerBinanceAutoPay(user) {
 }
 
 // ==========================================
-// 1. GET NUMBER ENDPOINT (Offical POST Setup)
+// 1. GET NUMBER ENDPOINT 
 // ==========================================
 fastify.route({
     method: ['GET', 'POST'], 
@@ -85,7 +85,6 @@ fastify.route({
             }
 
             const controller = new AbortController();
-            // 💥 FAIL-FAST: 10s to prevent server load during Number Fetch
             const timeoutId = setTimeout(() => controller.abort(), 10000); 
             request.raw.on('close', () => { if (request.raw.aborted) controller.abort(); });
 
@@ -170,7 +169,6 @@ const syncMNITBackground = async () => {
 
     try {
         const controller = new AbortController();
-        // 💥 FAIL-FAST OTP SYNC: 15 Seconds safely (Prevents server hang). Missed OTPs will come in the next poll! 💥
         const timeoutId = setTimeout(() => controller.abort(), 15000); 
 
         let response;
@@ -192,6 +190,19 @@ const syncMNITBackground = async () => {
         if (providerData?.data?.otps && Array.isArray(providerData.data.otps)) liveOtps = providerData.data.otps;
 
         if (liveOtps.length > 0) {
+            
+            // 💥 RESTORED: SAVING RAW LOGS FOR check-raw API 💥
+            try {
+                const RawLog = mongoose.models.mnit_raw_logs || mongoose.model("mnit_raw_logs", new mongoose.Schema({
+                    timestamp: { type: Date, default: Date.now },
+                    rawPayload: { type: Object }
+                }, { strict: false }));
+                
+                await RawLog.create({
+                    rawPayload: { source: "FASTIFY_OFFICIAL_API_PULL", totalOtpsFetched: liveOtps.length, providerData: liveOtps }
+                });
+            } catch (logErr) {}
+
             const otpGroups = {};
             liveOtps.forEach(m => {
                 const mNum = String(m.number || "").replace(/\D/g, "");
@@ -250,7 +261,6 @@ const syncMNITBackground = async () => {
                         let otpTimeMs = matchedOtpObj.time; 
                         if (otpTimeMs < 10000000000) otpTimeMs = otpTimeMs * 1000; 
 
-                        // 💥 TIME SKEW BUFFER: 2 Minutes safely prevents real OTPs from being rejected 💥
                         if (otpTimeMs < (orderTimeMs - 120000)) continue; 
 
                         const incomingMsgRaw = (matchedOtpObj.message || "").toString().trim();
@@ -486,7 +496,7 @@ const startServer = async () => {
     try {
         await connectDB();
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice OFFICIAL V6 (Zero-Miss Setup) is LIVE at: http://localhost:${process.env.PORT || 4000}`);
+        console.log(`⚡ ZENEX Microservice OFFICIAL V6.1 is LIVE at: http://localhost:${process.env.PORT || 4000}`);
     } catch (err) { process.exit(1); }
 };
 startServer();
