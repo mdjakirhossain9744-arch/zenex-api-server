@@ -4,10 +4,12 @@ import dotenv from 'dotenv';
 import { User, Order } from './models.js';
 import fastifyFormbody from '@fastify/formbody'; 
 import fastifyCors from '@fastify/cors'; 
+import Redis from "ioredis"; // 💥 Added Redis for Leader Election
 
 dotenv.config();
 
 const fastify = Fastify({ logger: false });
+const redis = new Redis(); // Connect to local Redis
 
 fastify.register(fastifyCors, { 
     origin: '*',
@@ -21,7 +23,7 @@ const connectDB = async () => {
     try {
         const opts = { maxPoolSize: 150, minPoolSize: 10 };
         await mongoose.connect(process.env.MONGODB_URI, opts);
-        console.log('✅ ZENEX Database Connected to API Microservice! 🚀');
+        console.log(`✅ ZENEX Database Connected to API Microservice [Instance: ${process.pid}]! 🚀`);
     } catch (error) {
         console.error('❌ Database Connection Failed:', error);
         process.exit(1);
@@ -30,7 +32,6 @@ const connectDB = async () => {
 
 const getUTCDateString = (dateObj = new Date()) => new Date(dateObj).toISOString().split('T')[0];
 
-// 🔥 THE NEW OFFICIAL API SETUP 🔥
 const REAL_API_KEY = "MBHLD9GWNSN"; 
 const BASE_API_URL = "https://api.2oo9.cloud/MXS47FLFX0U/tnemn/@public/api";
 
@@ -61,7 +62,7 @@ async function triggerBinanceAutoPay(user) {
 }
 
 // ==========================================
-// 1. GET NUMBER ENDPOINT 
+// 1. GET NUMBER ENDPOINT (Handled by ALL Clusters)
 // ==========================================
 fastify.route({
     method: ['GET', 'POST'], 
@@ -159,12 +160,18 @@ fastify.route({
 });
 
 // ==========================================
-// 2. BACKGROUND OTP SYNC (Smart Trust Engine)
+// 2. BACKGROUND OTP SYNC (Handled ONLY by the LEADER)
 // ==========================================
 let isSyncing = false;
 
 const syncMNITBackground = async () => {
     if (isSyncing) return; 
+
+    // 💥 THE LEADER ELECTION LOCK 💥
+    // Only ONE cluster instance will get this lock and become the Master for 4 seconds!
+    const lockAcquired = await redis.set("master_otp_sync_lock", "locked", "NX", "EX", 4);
+    if (!lockAcquired) return; // I am a Slave. I will stay quiet and handle Get Number traffic.
+
     isSyncing = true;
 
     try {
@@ -191,7 +198,6 @@ const syncMNITBackground = async () => {
 
         if (liveOtps.length > 0) {
             
-            // 💥 RESTORED: SAVING RAW LOGS FOR check-raw API 💥
             try {
                 const RawLog = mongoose.models.mnit_raw_logs || mongoose.model("mnit_raw_logs", new mongoose.Schema({
                     timestamp: { type: Date, default: Date.now },
@@ -199,7 +205,7 @@ const syncMNITBackground = async () => {
                 }, { strict: false }));
                 
                 await RawLog.create({
-                    rawPayload: { source: "FASTIFY_OFFICIAL_API_PULL", totalOtpsFetched: liveOtps.length, providerData: liveOtps }
+                    rawPayload: { source: `FASTIFY_CLUSTER_LEADER_[${process.pid}]`, totalOtpsFetched: liveOtps.length, providerData: liveOtps }
                 });
             } catch (logErr) {}
 
@@ -496,7 +502,7 @@ const startServer = async () => {
     try {
         await connectDB();
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice OFFICIAL V6.1 is LIVE at: http://localhost:${process.env.PORT || 4000}`);
+        console.log(`⚡ ZENEX Microservice V7 (Leader Protocol Active) is LIVE at: http://localhost:${process.env.PORT || 4000}`);
     } catch (err) { process.exit(1); }
 };
 startServer();
