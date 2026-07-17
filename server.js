@@ -61,6 +61,56 @@ async function triggerBinanceAutoPay(user) {
     } catch (e) {}
 }
 
+// 💥 THE BOSS UPGRADE: AI-Level Signature & Keyword Scanner 💥
+const extractServiceName = (msg) => {
+    if (!msg) return "Other";
+    const text = msg.toLowerCase();
+
+    // 1. App Hash Signatures (Android Auto-Verify Codes)
+    if (text.includes("w5eue21qadh") || text.includes("imo")) return "IMO";
+    if (text.includes("ftptmjpdh") || text.includes("viber")) return "Viber";
+    
+    // 2. Direct Name Matches
+    if (text.includes('whatsapp') || text.includes(' wa ') || text.includes('vwaq')) return 'WhatsApp';
+    if (text.includes('telegram') || text.includes('t.me')) return 'Telegram';
+    if (text.includes('facebook') || text.includes(' fb ') || text.includes('facebk')) return 'Facebook';
+    if (text.includes('instagram') || text.includes(' ig ')) return 'Instagram';
+    if (text.includes('google') || /g-\d+/.test(text) || text.includes('gmail') || text.includes('youtube')) return 'Google';
+    if (text.includes('tiktok') || text.includes(' tt ')) return 'TikTok';
+    if (text.includes('snapchat')) return 'Snapchat';
+    if (text.includes('twitter') || text.includes(' x ')) return 'Twitter/X';
+    if (text.includes('apple') || text.includes('icloud')) return 'Apple';
+    if (text.includes('microsoft') || text.includes('live') || text.includes('outlook')) return 'Microsoft';
+    if (text.includes('amazon') || text.includes('prime')) return 'Amazon';
+    if (text.includes('netflix')) return 'Netflix';
+    if (text.includes('uber')) return 'Uber';
+    if (text.includes('paypal') || text.includes('pay pal')) return 'PayPal';
+    if (text.includes('cashapp') || text.includes('cash app')) return 'CashApp';
+    if (text.includes('venmo')) return 'Venmo';
+    if (text.includes('tinder')) return 'Tinder';
+    if (text.includes('bumble')) return 'Bumble';
+    if (text.includes('discord')) return 'Discord';
+    if (text.includes('twitch')) return 'Twitch';
+    if (text.includes('yahoo')) return 'Yahoo';
+    if (text.includes('wechat')) return 'WeChat';
+    if (text.includes('line')) return 'Line';
+    if (text.includes('kakaotalk')) return 'KakaoTalk';
+    if (text.includes('airbnb')) return 'Uber/Airbnb'; 
+    
+    // 3. Finance & Crypto
+    if (text.includes('binance')) return 'Binance';
+    if (text.includes('coinbase')) return 'Coinbase';
+    if (text.includes('kucoin')) return 'KuCoin';
+    if (text.includes('kraken')) return 'KuCoin/Kraken';
+    
+    // 4. Fallback Hidden Patterns
+    if (text.includes('epic games')) return 'Epic Games';
+    if (text.includes('steam')) return 'Steam';
+    if (text.includes('riot')) return 'Riot Games';
+
+    return "Other"; 
+};
+
 // ==========================================
 // 1. GET NUMBER ENDPOINT (Handled by ALL Clusters)
 // ==========================================
@@ -178,23 +228,38 @@ const syncMNITBackground = async () => {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 15000); 
 
-        let response;
+        // 💥 THE BOSS PARALLEL FETCH (ZERO LOAD OVERHEAD) 💥
+        let otpResponse, consoleResponse;
         try {
-            response = await fetch(`${BASE_API_URL}/success-otp?t=${Date.now()}`, {
-                method: "GET", 
-                headers: { "mauthapi": REAL_API_KEY, "Accept": "application/json" },
-                signal: controller.signal
-            });
+            [otpResponse, consoleResponse] = await Promise.all([
+                fetch(`${BASE_API_URL}/success-otp?t=${Date.now()}`, {
+                    method: "GET", headers: { "mauthapi": REAL_API_KEY, "Accept": "application/json" }, signal: controller.signal
+                }).catch(() => null),
+                fetch(`${BASE_API_URL}/console?t=${Date.now()}`, {
+                    method: "GET", headers: { "mauthapi": REAL_API_KEY, "Accept": "application/json" }, signal: controller.signal
+                }).catch(() => null)
+            ]);
             clearTimeout(timeoutId);
         } catch (e) { clearTimeout(timeoutId); isSyncing = false; return; }
 
-        if (!response.ok) { isSyncing = false; return; }
+        if (!otpResponse || !otpResponse.ok) { isSyncing = false; return; }
         
-        let providerData;
-        try { providerData = await response.json(); } catch(e) { isSyncing = false; return; }
+        let providerData, consoleData;
+        try { providerData = await otpResponse.json(); } catch(e) { isSyncing = false; return; }
+        try { if (consoleResponse && consoleResponse.ok) consoleData = await consoleResponse.json(); } catch(e) {}
         
         let liveOtps = [];
         if (providerData?.data?.otps && Array.isArray(providerData.data.otps)) liveOtps = providerData.data.otps;
+
+        // 💥 O(1) HASH MAP FOR CONSOLE CROSS-MATCHING 💥
+        const consoleMap = new Map();
+        if (consoleData?.data?.hits && Array.isArray(consoleData.data.hits)) {
+            consoleData.data.hits.forEach(hit => {
+                if (hit.message && hit.sid) {
+                    consoleMap.set(hit.message.trim(), hit.sid);
+                }
+            });
+        }
 
         if (liveOtps.length > 0) {
             
@@ -282,6 +347,19 @@ const syncMNITBackground = async () => {
                             incomingCode = incomingMatch[0].trim(); 
                         }
 
+                        // 💥 ZERO-LOAD SERVICE INJECTOR MAGIC 💥
+                        let finalMessageToSave = incomingMsgRaw;
+                        let locallyDetected = extractServiceName(incomingMsgRaw);
+                        
+                        // If our local AI scanner fails, ONLY then check the Console Map
+                        if (locallyDetected === "Other") {
+                            let providerSid = consoleMap.get(incomingMsgRaw);
+                            if (providerSid && providerSid !== "Other" && providerSid !== "Unknown") {
+                                // Add a secure tag. Our frontend will automatically catch this!
+                                finalMessageToSave = incomingMsgRaw + ` [Service: ${providerSid}]`;
+                            }
+                        }
+
                         let user = globalWorkerUserCache.get(order.userEmail);
                         if (!user) {
                             user = await User.findOne({ email: order.userEmail }).lean();
@@ -319,7 +397,7 @@ const syncMNITBackground = async () => {
                                     $set: { 
                                         status: "DONE", 
                                         otp: incomingCode, 
-                                        fullMessage: order.fullMessage && order.fullMessage !== "Waiting..." ? order.fullMessage + " _||_ " + incomingMsgRaw : incomingMsgRaw,
+                                        fullMessage: order.fullMessage && order.fullMessage !== "Waiting..." ? order.fullMessage + " _||_ " + finalMessageToSave : finalMessageToSave,
                                         expireAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) 
                                     },
                                     $inc: { orderCost: otpCost, orderCommission: otpCommission },
@@ -417,18 +495,6 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
 
     } catch (error) { return reply.status(500).send({ meta: { status: "error" } }); }
 });
-
-const extractServiceName = (msg) => {
-    if (!msg) return "Other";
-    const lowerMsg = msg.toLowerCase();
-    if (lowerMsg.includes('facebook') || lowerMsg.includes(' fb ')) return 'Facebook';
-    if (lowerMsg.includes('whatsapp') || lowerMsg.includes(' wa ')) return 'WhatsApp';
-    if (lowerMsg.includes('telegram') || lowerMsg.includes(' tg ')) return 'Telegram';
-    if (lowerMsg.includes('instagram') || lowerMsg.includes(' ig ')) return 'Instagram';
-    if (lowerMsg.includes('google') || /g-\d+/.test(lowerMsg) || lowerMsg.includes('gmail')) return 'Google';
-    if (lowerMsg.includes('tiktok') || lowerMsg.includes(' tt ')) return 'TikTok';
-    return "Other";
-};
 
 let cachedActiveData = null;
 let lastFetchTime = 0;
