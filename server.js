@@ -4,12 +4,12 @@ import dotenv from 'dotenv';
 import { User, Order } from './models.js';
 import fastifyFormbody from '@fastify/formbody'; 
 import fastifyCors from '@fastify/cors'; 
-import Redis from "ioredis"; // 💥 Added Redis for Leader Election
+import Redis from "ioredis"; 
 
 dotenv.config();
 
 const fastify = Fastify({ logger: false });
-const redis = new Redis(); // Connect to local Redis
+const redis = new Redis(); 
 
 fastify.register(fastifyCors, { 
     origin: '*',
@@ -61,16 +61,13 @@ async function triggerBinanceAutoPay(user) {
     } catch (e) {}
 }
 
-// 💥 THE BOSS UPGRADE: AI-Level Signature & Keyword Scanner 💥
 const extractServiceName = (msg) => {
     if (!msg) return "Other";
     const text = msg.toLowerCase();
 
-    // 1. App Hash Signatures (Android Auto-Verify Codes)
     if (text.includes("w5eue21qadh") || text.includes("imo")) return "IMO";
     if (text.includes("ftptmjpdh") || text.includes("viber")) return "Viber";
     
-    // 2. Direct Name Matches
     if (text.includes('whatsapp') || text.includes(' wa ') || text.includes('vwaq')) return 'WhatsApp';
     if (text.includes('telegram') || text.includes('t.me')) return 'Telegram';
     if (text.includes('facebook') || text.includes(' fb ') || text.includes('facebk')) return 'Facebook';
@@ -97,13 +94,11 @@ const extractServiceName = (msg) => {
     if (text.includes('kakaotalk')) return 'KakaoTalk';
     if (text.includes('airbnb')) return 'Uber/Airbnb'; 
     
-    // 3. Finance & Crypto
     if (text.includes('binance')) return 'Binance';
     if (text.includes('coinbase')) return 'Coinbase';
     if (text.includes('kucoin')) return 'KuCoin';
     if (text.includes('kraken')) return 'KuCoin/Kraken';
     
-    // 4. Fallback Hidden Patterns
     if (text.includes('epic games')) return 'Epic Games';
     if (text.includes('steam')) return 'Steam';
     if (text.includes('riot')) return 'Riot Games';
@@ -112,7 +107,7 @@ const extractServiceName = (msg) => {
 };
 
 // ==========================================
-// 1. GET NUMBER ENDPOINT (Handled by ALL Clusters)
+// 1. GET NUMBER ENDPOINT 
 // ==========================================
 fastify.route({
     method: ['GET', 'POST'], 
@@ -217,10 +212,8 @@ let isSyncing = false;
 const syncMNITBackground = async () => {
     if (isSyncing) return; 
 
-    // 💥 THE LEADER ELECTION LOCK 💥
-    // Only ONE cluster instance will get this lock and become the Master for 4 seconds!
     const lockAcquired = await redis.set("master_otp_sync_lock", "locked", "NX", "EX", 4);
-    if (!lockAcquired) return; // I am a Slave. I will stay quiet and handle Get Number traffic.
+    if (!lockAcquired) return; 
 
     isSyncing = true;
 
@@ -228,7 +221,6 @@ const syncMNITBackground = async () => {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 15000); 
 
-        // 💥 THE BOSS PARALLEL FETCH (ZERO LOAD OVERHEAD) 💥
         let otpResponse, consoleResponse;
         try {
             [otpResponse, consoleResponse] = await Promise.all([
@@ -251,7 +243,6 @@ const syncMNITBackground = async () => {
         let liveOtps = [];
         if (providerData?.data?.otps && Array.isArray(providerData.data.otps)) liveOtps = providerData.data.otps;
 
-        // 💥 O(1) HASH MAP FOR CONSOLE CROSS-MATCHING 💥
         const consoleMap = new Map();
         if (consoleData?.data?.hits && Array.isArray(consoleData.data.hits)) {
             consoleData.data.hits.forEach(hit => {
@@ -332,7 +323,9 @@ const syncMNITBackground = async () => {
                         let otpTimeMs = matchedOtpObj.time; 
                         if (otpTimeMs < 10000000000) otpTimeMs = otpTimeMs * 1000; 
 
-                        if (otpTimeMs < (orderTimeMs - 120000)) continue; 
+                        // 💥 THE BOSS FIX: Relaxed Time Buffer from 2 mins to 24 Hours! 💥
+                        // Provider's clock is out of sync. This ensures valid OTPs aren't rejected.
+                        if (otpTimeMs < (orderTimeMs - 86400000)) continue; 
 
                         const incomingMsgRaw = (matchedOtpObj.message || "").toString().trim();
                         const lowerMsg = incomingMsgRaw.toLowerCase();
@@ -347,15 +340,12 @@ const syncMNITBackground = async () => {
                             incomingCode = incomingMatch[0].trim(); 
                         }
 
-                        // 💥 ZERO-LOAD SERVICE INJECTOR MAGIC 💥
                         let finalMessageToSave = incomingMsgRaw;
                         let locallyDetected = extractServiceName(incomingMsgRaw);
                         
-                        // If our local AI scanner fails, ONLY then check the Console Map
                         if (locallyDetected === "Other") {
                             let providerSid = consoleMap.get(incomingMsgRaw);
                             if (providerSid && providerSid !== "Other" && providerSid !== "Unknown") {
-                                // Add a secure tag. Our frontend will automatically catch this!
                                 finalMessageToSave = incomingMsgRaw + ` [Service: ${providerSid}]`;
                             }
                         }
