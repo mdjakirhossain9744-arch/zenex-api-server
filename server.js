@@ -61,13 +61,15 @@ async function triggerBinanceAutoPay(user) {
     } catch (e) {}
 }
 
+// 💥 THE BOSS UPGRADE: Dynamic Regex + Predefined AI Scanner 💥
 const extractServiceName = (msg) => {
     if (!msg) return "Other";
     const text = msg.toLowerCase();
 
+    // 1. Existing App Hash Signatures & Static Names
     if (text.includes("w5eue21qadh") || text.includes("imo")) return "IMO";
     if (text.includes("ftptmjpdh") || text.includes("viber")) return "Viber";
-    
+    if (text.includes('lalamove')) return 'Lalamove'; 
     if (text.includes('whatsapp') || text.includes(' wa ') || text.includes('vwaq')) return 'WhatsApp';
     if (text.includes('telegram') || text.includes('t.me')) return 'Telegram';
     if (text.includes('facebook') || text.includes(' fb ') || text.includes('facebk')) return 'Facebook';
@@ -93,15 +95,38 @@ const extractServiceName = (msg) => {
     if (text.includes('line')) return 'Line';
     if (text.includes('kakaotalk')) return 'KakaoTalk';
     if (text.includes('airbnb')) return 'Uber/Airbnb'; 
-    
     if (text.includes('binance')) return 'Binance';
     if (text.includes('coinbase')) return 'Coinbase';
     if (text.includes('kucoin')) return 'KuCoin';
     if (text.includes('kraken')) return 'KuCoin/Kraken';
-    
     if (text.includes('epic games')) return 'Epic Games';
     if (text.includes('steam')) return 'Steam';
     if (text.includes('riot')) return 'Riot Games';
+    if (text.includes('daraz')) return 'Daraz';
+    if (text.includes('pathao')) return 'Pathao';
+    if (text.includes('foodpanda')) return 'Foodpanda';
+
+    // 2. 💥 DYNAMIC REGEX SCANNER FOR UNKNOWN APPS (e.g. <Million.com>, 【App】, [App]) 💥
+    // This catches hidden escape characters (\x1B) and common brackets
+    const bracketMatch = msg.match(/(?:<|\[|【|\x1B<)\s*([A-Za-z0-9.\- ]{2,20})\s*(?:>|\]|】|\x1B>)/);
+    if (bracketMatch && bracketMatch[1]) {
+        const extracted = bracketMatch[1].trim();
+        const ignored = ["#", "code", "reply", "sms", "otp", "msg", "verification"];
+        if (!ignored.includes(extracted.toLowerCase())) {
+            // Return capitalized properly (e.g. million.com -> Million.com)
+            return extracted.charAt(0).toUpperCase() + extracted.slice(1);
+        }
+    }
+
+    // 3. 💥 DYNAMIC REGEX FOR "operating on X" or "verification code for X" 💥
+    const opMatch = msg.match(/(?:operating on|code for|from)\s+([A-Za-z0-9.\-]{2,20})\b/i);
+    if (opMatch && opMatch[1]) {
+        const ext = opMatch[1].trim();
+        const ignored = ["the", "a", "an", "your", "this"];
+        if (!ignored.includes(ext.toLowerCase())) {
+            return ext.charAt(0).toUpperCase() + ext.slice(1);
+        }
+    }
 
     return "Other"; 
 };
@@ -221,36 +246,22 @@ const syncMNITBackground = async () => {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 15000); 
 
-        let otpResponse, consoleResponse;
+        // 💥 CONSOLE FETCH REMOVED AS REQUESTED. REVERTED TO ONLY FETCHING OTPS 💥
+        let otpResponse;
         try {
-            [otpResponse, consoleResponse] = await Promise.all([
-                fetch(`${BASE_API_URL}/success-otp?t=${Date.now()}`, {
-                    method: "GET", headers: { "mauthapi": REAL_API_KEY, "Accept": "application/json" }, signal: controller.signal
-                }).catch(() => null),
-                fetch(`${BASE_API_URL}/console?t=${Date.now()}`, {
-                    method: "GET", headers: { "mauthapi": REAL_API_KEY, "Accept": "application/json" }, signal: controller.signal
-                }).catch(() => null)
-            ]);
+            otpResponse = await fetch(`${BASE_API_URL}/success-otp?t=${Date.now()}`, {
+                method: "GET", headers: { "mauthapi": REAL_API_KEY, "Accept": "application/json" }, signal: controller.signal
+            });
             clearTimeout(timeoutId);
         } catch (e) { clearTimeout(timeoutId); isSyncing = false; return; }
 
         if (!otpResponse || !otpResponse.ok) { isSyncing = false; return; }
         
-        let providerData, consoleData;
+        let providerData;
         try { providerData = await otpResponse.json(); } catch(e) { isSyncing = false; return; }
-        try { if (consoleResponse && consoleResponse.ok) consoleData = await consoleResponse.json(); } catch(e) {}
         
         let liveOtps = [];
         if (providerData?.data?.otps && Array.isArray(providerData.data.otps)) liveOtps = providerData.data.otps;
-
-        const consoleMap = new Map();
-        if (consoleData?.data?.hits && Array.isArray(consoleData.data.hits)) {
-            consoleData.data.hits.forEach(hit => {
-                if (hit.message && hit.sid) {
-                    consoleMap.set(hit.message.trim(), hit.sid);
-                }
-            });
-        }
 
         if (liveOtps.length > 0) {
             
@@ -323,8 +334,6 @@ const syncMNITBackground = async () => {
                         let otpTimeMs = matchedOtpObj.time; 
                         if (otpTimeMs < 10000000000) otpTimeMs = otpTimeMs * 1000; 
 
-                        // 💥 THE BOSS FIX: Relaxed Time Buffer from 2 mins to 24 Hours! 💥
-                        // Provider's clock is out of sync. This ensures valid OTPs aren't rejected.
                         if (otpTimeMs < (orderTimeMs - 86400000)) continue; 
 
                         const incomingMsgRaw = (matchedOtpObj.message || "").toString().trim();
@@ -340,14 +349,13 @@ const syncMNITBackground = async () => {
                             incomingCode = incomingMatch[0].trim(); 
                         }
 
-                        let finalMessageToSave = incomingMsgRaw;
+                        // 💥 DYNAMIC SERVICE INJECTOR 💥
                         let locallyDetected = extractServiceName(incomingMsgRaw);
-                        
-                        if (locallyDetected === "Other") {
-                            let providerSid = consoleMap.get(incomingMsgRaw);
-                            if (providerSid && providerSid !== "Other" && providerSid !== "Unknown") {
-                                finalMessageToSave = incomingMsgRaw + ` [Service: ${providerSid}]`;
-                            }
+                        let finalMessageToSave = incomingMsgRaw;
+
+                        // If Dynamic Scanner finds a name, explicitly tag it so UI can easily show it
+                        if (locallyDetected !== "Other" && !incomingMsgRaw.includes("[Service:")) {
+                            finalMessageToSave = incomingMsgRaw + ` [Service: ${locallyDetected}]`;
                         }
 
                         let user = globalWorkerUserCache.get(order.userEmail);
