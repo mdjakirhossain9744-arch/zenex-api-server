@@ -5,6 +5,8 @@ import { User, Order } from './models.js';
 import fastifyFormbody from '@fastify/formbody'; 
 import fastifyCors from '@fastify/cors'; 
 import Redis from "ioredis"; 
+// 💥 THE BOSS FIX: COMPRESSION ENGINE FOR SLOW NETWORKS & VPN 💥
+import fastifyCompress from '@fastify/compress'; 
 
 dotenv.config();
 
@@ -18,6 +20,12 @@ fastify.register(fastifyCors, {
 });
 
 fastify.register(fastifyFormbody); 
+
+// 💥 ENABLE GLOBAL COMPRESSION (Reduces JSON Payload by 80%) 💥
+fastify.register(fastifyCompress, {
+    global: true,
+    encodings: ['br', 'gzip', 'deflate'] // Brotli is highly optimized for slow networks
+});
 
 const connectDB = async () => {
     try {
@@ -66,7 +74,6 @@ const extractServiceName = (msg) => {
     if (!msg) return "Other";
     const text = msg.toLowerCase();
 
-    // 1. Existing App Hash Signatures & Static Names
     if (text.includes("w5eue21qadh") || text.includes("imo")) return "IMO";
     if (text.includes("ftptmjpdh") || text.includes("viber")) return "Viber";
     if (text.includes('lalamove')) return 'Lalamove'; 
@@ -106,19 +113,15 @@ const extractServiceName = (msg) => {
     if (text.includes('pathao')) return 'Pathao';
     if (text.includes('foodpanda')) return 'Foodpanda';
 
-    // 2. 💥 DYNAMIC REGEX SCANNER FOR UNKNOWN APPS (e.g. <Million.com>, 【App】, [App]) 💥
-    // This catches hidden escape characters (\x1B) and common brackets
     const bracketMatch = msg.match(/(?:<|\[|【|\x1B<)\s*([A-Za-z0-9.\- ]{2,20})\s*(?:>|\]|】|\x1B>)/);
     if (bracketMatch && bracketMatch[1]) {
         const extracted = bracketMatch[1].trim();
         const ignored = ["#", "code", "reply", "sms", "otp", "msg", "verification"];
         if (!ignored.includes(extracted.toLowerCase())) {
-            // Return capitalized properly (e.g. million.com -> Million.com)
             return extracted.charAt(0).toUpperCase() + extracted.slice(1);
         }
     }
 
-    // 3. 💥 DYNAMIC REGEX FOR "operating on X" or "verification code for X" 💥
     const opMatch = msg.match(/(?:operating on|code for|from)\s+([A-Za-z0-9.\-]{2,20})\b/i);
     if (opMatch && opMatch[1]) {
         const ext = opMatch[1].trim();
@@ -246,7 +249,6 @@ const syncMNITBackground = async () => {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 15000); 
 
-        // 💥 CONSOLE FETCH REMOVED AS REQUESTED. REVERTED TO ONLY FETCHING OTPS 💥
         let otpResponse;
         try {
             otpResponse = await fetch(`${BASE_API_URL}/success-otp?t=${Date.now()}`, {
@@ -353,7 +355,6 @@ const syncMNITBackground = async () => {
                         let locallyDetected = extractServiceName(incomingMsgRaw);
                         let finalMessageToSave = incomingMsgRaw;
 
-                        // If Dynamic Scanner finds a name, explicitly tag it so UI can easily show it
                         if (locallyDetected !== "Other" && !incomingMsgRaw.includes("[Service:")) {
                             finalMessageToSave = incomingMsgRaw + ` [Service: ${locallyDetected}]`;
                         }
