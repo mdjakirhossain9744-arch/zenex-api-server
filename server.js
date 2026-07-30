@@ -61,11 +61,20 @@ setInterval(() => { globalWorkerUserCache.clear(); }, 5 * 60 * 1000);
 
 async function triggerBinanceAutoPay(user) {
     try {
-        await fetch(`${process.env.MAIN_SITE_URL}/api/cron/process-binance-payout`, {
+        const res = await fetch(`${process.env.MAIN_SITE_URL}/api/cron/process-binance-payout`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ userId: user._id })
         });
+        const result = await res.json().catch(() => ({}));
+        if (result && result.success === false) {
+            await User.findOneAndUpdate({ _id: user._id }, { $set: { autoPayEnabled: false } });
+            if (globalWorkerUserCache.has(user.email)) {
+                let cachedUser = globalWorkerUserCache.get(user.email);
+                cachedUser.autoPayEnabled = false;
+                globalWorkerUserCache.set(user.email, cachedUser);
+            }
+        }
     } catch (e) {}
 }
 
