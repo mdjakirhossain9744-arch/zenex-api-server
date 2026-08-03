@@ -47,6 +47,33 @@ const apiAuthCache = new Map();
 const globalWorkerUserCache = new Map(); 
 const userOtpResponseCache = new Map(); 
 
+// 💥 BOSS UPGRADE: FAST MASKING CACHE 💥
+let cachedMaskingSettings = { keywords: [], expiry: 0 };
+async function getMaskingKeywords() {
+    if (Date.now() < cachedMaskingSettings.expiry) return cachedMaskingSettings.keywords;
+    try {
+        const db = mongoose.connection.db;
+        const settings = await db.collection("system_settings").findOne({ type: "global" });
+        const kw = settings?.hiddenKeywords || [];
+        cachedMaskingSettings = { keywords: kw, expiry: Date.now() + 60000 }; 
+        return kw;
+    } catch (e) {
+        return cachedMaskingSettings.keywords;
+    }
+}
+
+const applyMasking = (text, keywords) => {
+    if (!text) return text;
+    let masked = text;
+    keywords.forEach(w => {
+        if (w && w.length > 1) {
+            const regex = new RegExp(w, 'gi');
+            masked = masked.replace(regex, '****');
+        }
+    });
+    return masked;
+};
+
 setInterval(() => {
     const now = Date.now();
     for (const [key, value] of apiAuthCache.entries()) {
@@ -78,7 +105,6 @@ async function triggerBinanceAutoPay(user) {
     } catch (e) {}
 }
 
-// 💥 THE BOSS UPGRADE: Dynamic Regex + Predefined AI Scanner 💥
 const extractServiceName = (msg) => {
     if (!msg) return "Other";
     const text = msg.toLowerCase();
@@ -360,7 +386,6 @@ const syncMNITBackground = async () => {
                             incomingCode = incomingMatch[0].trim(); 
                         }
 
-                        // 💥 DYNAMIC SERVICE INJECTOR 💥
                         let locallyDetected = extractServiceName(incomingMsgRaw);
                         let finalMessageToSave = incomingMsgRaw;
 
@@ -471,6 +496,9 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
 
         if (!user || !user.isApiActive) return reply.status(401).send({ meta: { status: "error" }, message: "Unauthorized" });
 
+        // 💥 BOSS UPGRADE: FETCH KEYWORDS FOR API MASKING 💥
+        const hiddenKeywords = await getMaskingKeywords();
+
         const twentyMinutesAgo = new Date(Date.now() - 20 * 60 * 1000);
         
         const recentOrders = await Order.find({
@@ -487,13 +515,22 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
             const numberClean = String(order.displayNumber || order.searchNumber || "").replace(/\D/g, "");
             const baseNid = "ZX_" + order._id.toString().substring(0, 10).toUpperCase();
 
+            // 🛡️ APPLY API MASKING TO USER RESPONSE 🛡️
             if (order.fullMessage && order.fullMessage.includes("_||_")) {
                 const msgsArray = order.fullMessage.split("_||_").map(m => m.trim()).filter(Boolean);
                 msgsArray.forEach((msg, idx) => {
-                    expandedOtps.push({ nid: `${baseNid}_${idx}`, number: numberClean, otp: msg, country: order.country || "Unknown", operator: order.operator || "Any", created_at: formattedDate });
+                    expandedOtps.push({ 
+                        nid: `${baseNid}_${idx}`, number: numberClean, 
+                        otp: applyMasking(msg, hiddenKeywords), 
+                        country: order.country || "Unknown", operator: order.operator || "Any", created_at: formattedDate 
+                    });
                 });
             } else {
-                expandedOtps.push({ nid: baseNid, number: numberClean, otp: order.fullMessage || order.otp || "", country: order.country || "Unknown", operator: order.operator || "Any", created_at: formattedDate });
+                expandedOtps.push({ 
+                    nid: baseNid, number: numberClean, 
+                    otp: applyMasking(order.fullMessage || order.otp || "", hiddenKeywords), 
+                    country: order.country || "Unknown", operator: order.operator || "Any", created_at: formattedDate 
+                });
             }
         });
 
@@ -514,28 +551,36 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
             return reply.send({ success: true, cached: true, data: cachedActiveData });
         }
 
+        // 💥 BOSS UPGRADE: MASKING FOR MANAGER/ADMIN ACTIVE RANGES 💥
+        const hiddenKeywords = await getMaskingKeywords();
+
         const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
         const recentOrders = await Order.find({ status: { $in: ["DONE", "Success", "SUCCESS"] }, updatedAt: { $gte: oneHourAgo } }).select("fullMessage otp searchNumber number").lean();
         const rangeMap = {};
 
         recentOrders.forEach((o) => {
             let msg = o.fullMessage || o.otp || "";
-            const service = extractServiceName(msg);
+            const rawService = extractServiceName(msg);
+            const maskedService = applyMasking(rawService, hiddenKeywords); // 🛡️ Service MASKED
+
             let num = o.searchNumber || o.number || "";
             num = String(num).replace("+", "");
             
             if (num.length >= 6) {
                 const rangeStr = num.substring(0, 6) + "XXX"; 
                 let tag = "General";
-                if (service === "Facebook") {
+                if (rawService === "Facebook") {
                     const match = msg.match(/\b\d{4,8}\b/);
                     if (match) {
                         if (match[0].length === 6 || match[0].length === 8) tag = "Fb Clone";
                         else if (match[0].length === 5) tag = "New Fb";
                     }
                 }
-                const key = `${rangeStr}|${service}|${tag}`;
-                if (!rangeMap[key]) rangeMap[key] = { range: rangeStr, service: service, tag: tag, hits: 0 };
+                
+                const maskedTag = applyMasking(tag, hiddenKeywords); // 🛡️ Tag MASKED
+
+                const key = `${rangeStr}|${maskedService}|${maskedTag}`;
+                if (!rangeMap[key]) rangeMap[key] = { range: rangeStr, service: maskedService, tag: maskedTag, hits: 0 };
                 rangeMap[key].hits += 1;
             }
         });
@@ -564,10 +609,15 @@ fastify.get('/v1/user/today-otps', async (request, reply) => {
         }
         
         if (!user) return reply.status(401).send({ error: "Invalid API Key" });
+
+        // 💥 BOSS UPGRADE: TEXT EXPORT MASKING 💥
+        const hiddenKeywords = await getMaskingKeywords();
+
         const todayStr = getUTCDateString();
         const orders = await Order.find({ userEmail: user.email, dateString: todayStr, status: "DONE" }).select("displayNumber otp -_id").lean();
         if (orders.length === 0) return reply.type('text/plain').send("NO_DATA");
-        const textData = orders.map((o) => `${String(o.displayNumber).replace(/\D/g, "")}|${o.otp}`).join('\n');
+        
+        const textData = orders.map((o) => `${String(o.displayNumber).replace(/\D/g, "")}|${applyMasking(o.otp, hiddenKeywords)}`).join('\n');
         return reply.type('text/plain').send(textData);
     } catch (error) { return reply.status(500).send({ error: "Server Error" }); }
 });
