@@ -76,7 +76,6 @@ const applyMasking = (text, keywords) => {
         if (word && word.length > 1) {
             const regex = new RegExp(escapeRegExp(word), 'gi');
             masked = masked.replace(regex, (match) => {
-                // স্পেস বাদে বাকি সব ক্যারেক্টারকে '*' বানিয়ে দেবে, কিন্তু স্পেস ঠিক রাখবে
                 return match.replace(/[^\s]/g, '*');
             });
         }
@@ -119,6 +118,8 @@ const extractServiceName = (msg) => {
     if (!msg) return "Other";
     const text = msg.toLowerCase();
 
+    // 💥 THE BOSS FIX: Added META and X Detection 💥
+    if (text.includes("meta")) return "Meta";
     if (text.includes("w5eue21qadh") || text.includes("imo")) return "IMO";
     if (text.includes("ftptmjpdh") || text.includes("viber")) return "Viber";
     if (text.includes('lalamove')) return 'Lalamove'; 
@@ -129,7 +130,7 @@ const extractServiceName = (msg) => {
     if (text.includes('google') || /g-\d+/.test(text) || text.includes('gmail') || text.includes('youtube')) return 'Google';
     if (text.includes('tiktok') || text.includes(' tt ')) return 'TikTok';
     if (text.includes('snapchat')) return 'Snapchat';
-    if (text.includes('twitter') || text.includes(' x ')) return 'Twitter/X';
+    if (text.includes('twitter') || text.includes(' x ') || text.includes('for x')) return 'X';
     if (text.includes('apple') || text.includes('icloud')) return 'Apple';
     if (text.includes('microsoft') || text.includes('live') || text.includes('outlook')) return 'Microsoft';
     if (text.includes('amazon') || text.includes('prime')) return 'Amazon';
@@ -390,18 +391,16 @@ const syncMNITBackground = async () => {
                         const digitCount = (incomingMsgRaw.match(/\d/g) || []).length;
                         if (digitCount < 3) continue; 
                         
+                        // 💥 THE BOSS FIX: ONLY STANDARD OTP EXTRACTOR 💥
                         let incomingCode = incomingMsgRaw; 
                         const incomingMatch = incomingMsgRaw.match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)/);
+
                         if (incomingMatch && incomingMatch[0]) {
                             incomingCode = incomingMatch[0].trim(); 
                         }
 
-                        let locallyDetected = extractServiceName(incomingMsgRaw);
+                        // 💥 CLEAN ARCHITECTURE: Do NOT append [Service: X] anymore 💥
                         let finalMessageToSave = incomingMsgRaw;
-
-                        if (locallyDetected !== "Other" && !incomingMsgRaw.includes("[Service:")) {
-                            finalMessageToSave = incomingMsgRaw + ` [Service: ${locallyDetected}]`;
-                        }
 
                         let user = globalWorkerUserCache.get(order.userEmail);
                         if (!user) {
@@ -579,7 +578,7 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
             if (num.length >= 6) {
                 const rangeStr = num.substring(0, 6) + "XXX"; 
                 let tag = "General";
-                if (rawService === "Facebook") {
+                if (rawService === "Facebook" || rawService === "Meta") {
                     const match = msg.match(/\b\d{4,8}\b/);
                     if (match) {
                         if (match[0].length === 6 || match[0].length === 8) tag = "Fb Clone";
@@ -628,6 +627,7 @@ fastify.get('/v1/user/today-otps', async (request, reply) => {
         if (orders.length === 0) return reply.type('text/plain').send("NO_DATA");
         
         const textData = orders.map((o) => `${String(o.displayNumber).replace(/\D/g, "")}|${applyMasking(o.otp, hiddenKeywords)}`).join('\n');
+        
         return reply.type('text/plain').send(textData);
     } catch (error) { return reply.status(500).send({ error: "Server Error" }); }
 });
