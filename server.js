@@ -118,24 +118,26 @@ const extractServiceName = (msg) => {
     if (!msg) return "Other";
     const text = msg.toLowerCase();
 
-    // 💥 THE BOSS FIX: Added META and X Detection 💥
-    if (text.includes("meta")) return "Meta";
-    if (text.includes("w5eue21qadh") || text.includes("imo")) return "IMO";
-    if (text.includes("ftptmjpdh") || text.includes("viber")) return "Viber";
+    // 💥 UPGRADE 1: GLOBAL SERVICE DETECTION ENGINE (Hashes, Short URLs, Foreign Languages) 💥
+    if (text.includes('facebook') || text.includes(' fb ') || text.includes('facebk') || text.includes('fb.me') || text.includes('h29q+fsn4sr') || text.includes('laz+nxcarlw') || text.includes('فيسبوك') || text.includes('फेसबुक') || text.includes('ফেসবুক') || text.includes('脸书') || text.includes('ፌስቡክ') || text.includes('ფეისბუქი')) return 'Facebook';
+    if (text.includes('whatsapp') || text.includes(' wa ') || text.includes('vwaq') || text.includes('wa.me') || text.includes('واتساب') || text.includes('वाट्सएप') || text.includes('হোয়াটসঅ্যাপ') || text.includes('వాట్సాప్') || text.includes('왓츠앱')) return 'WhatsApp';
+    if (text.includes('telegram') || text.includes('t.me') || text.includes('تيليجرام') || text.includes('टेलीग्राम') || text.includes('টেলিগ্রাম') || text.includes('телеграм') || text.includes('电报') || text.includes('ቴሌግራም')) return 'Telegram';
+    if (text.includes('instagram') || text.includes(' ig ') || text.includes('ig.me') || text.includes('انستجرام') || text.includes('इंस्टाग्राम') || text.includes('ইন্সটাগ্রাম') || text.includes('인스타그램')) return 'Instagram';
+    if (text.includes('google') || /g-\d+/.test(text) || text.includes('gmail') || text.includes('youtube') || text.includes('g.co') || text.includes('جوجل') || text.includes('गूगल') || text.includes('গুগল') || text.includes('谷歌') || text.includes('구글') || text.includes('гугл')) return 'Google';
+    
+    if (text.includes('w5eue21qadh') || text.includes('imo') || text.includes('ايمو') || text.includes('ইমো')) return 'IMO';
+    if (text.includes('ftptmjpdh') || text.includes('viber') || text.includes('فايبر') || text.includes('ভাইবার')) return 'Viber';
+    
+    if (text.includes('meta')) return 'Meta';
     if (text.includes('lalamove')) return 'Lalamove'; 
-    if (text.includes('whatsapp') || text.includes(' wa ') || text.includes('vwaq')) return 'WhatsApp';
-    if (text.includes('telegram') || text.includes('t.me')) return 'Telegram';
-    if (text.includes('facebook') || text.includes(' fb ') || text.includes('facebk')) return 'Facebook';
-    if (text.includes('instagram') || text.includes(' ig ')) return 'Instagram';
-    if (text.includes('google') || /g-\d+/.test(text) || text.includes('gmail') || text.includes('youtube')) return 'Google';
-    if (text.includes('tiktok') || text.includes(' tt ')) return 'TikTok';
+    if (text.includes('tiktok') || text.includes(' tt ') || text.includes('تيك توك') || text.includes('टिकटॉक') || text.includes('টিকটক') || text.includes('틱톡')) return 'TikTok';
     if (text.includes('snapchat')) return 'Snapchat';
     if (text.includes('twitter') || text.includes(' x ') || text.includes('for x')) return 'X';
     if (text.includes('apple') || text.includes('icloud')) return 'Apple';
     if (text.includes('microsoft') || text.includes('live') || text.includes('outlook')) return 'Microsoft';
     if (text.includes('amazon') || text.includes('prime')) return 'Amazon';
     if (text.includes('netflix')) return 'Netflix';
-    if (text.includes('uber')) return 'Uber';
+    if (text.includes('uber') && !text.includes('airbnb')) return 'Uber';
     if (text.includes('paypal') || text.includes('pay pal')) return 'PayPal';
     if (text.includes('cashapp') || text.includes('cash app')) return 'CashApp';
     if (text.includes('venmo')) return 'Venmo';
@@ -148,9 +150,9 @@ const extractServiceName = (msg) => {
     if (text.includes('line')) return 'Line';
     if (text.includes('kakaotalk')) return 'KakaoTalk';
     if (text.includes('airbnb')) return 'Uber/Airbnb'; 
-    if (text.includes('binance')) return 'Binance';
+    if (text.includes('binance') || text.includes('بینانس') || text.includes('बाइनेंस') || text.includes('বাইনান্স')) return 'Binance';
     if (text.includes('coinbase')) return 'Coinbase';
-    if (text.includes('kucoin')) return 'KuCoin';
+    if (text.includes('kucoin') && !text.includes('kraken')) return 'KuCoin';
     if (text.includes('kraken')) return 'KuCoin/Kraken';
     if (text.includes('epic games')) return 'Epic Games';
     if (text.includes('steam')) return 'Steam';
@@ -391,9 +393,9 @@ const syncMNITBackground = async () => {
                         const digitCount = (incomingMsgRaw.match(/\d/g) || []).length;
                         if (digitCount < 3) continue; 
                         
-                        // 💥 THE BOSS FIX: ONLY STANDARD OTP EXTRACTOR 💥
-                        let incomingCode = incomingMsgRaw; 
-                        const incomingMatch = incomingMsgRaw.match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)/);
+                        // 💥 UPGRADE 2: STRICT OTP EXTRACTOR 💥
+                        let incomingCode = "00000"; 
+                        const incomingMatch = incomingMsgRaw.match(/(?:\b\d{4,12}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)/);
 
                         if (incomingMatch && incomingMatch[0]) {
                             incomingCode = incomingMatch[0].trim(); 
