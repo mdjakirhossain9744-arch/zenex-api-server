@@ -62,13 +62,23 @@ async function getMaskingKeywords() {
     }
 }
 
+// 💥 BOSS UPGRADE: REGEX ESCAPER 💥
+const escapeRegExp = (string) => {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+};
+
+// 💥 BOSS UPGRADE: DYNAMIC STAR & SPACE PRESERVER ENGINE 💥
 const applyMasking = (text, keywords) => {
     if (!text) return text;
     let masked = text;
     keywords.forEach(w => {
-        if (w && w.length > 1) {
-            const regex = new RegExp(w, 'gi');
-            masked = masked.replace(regex, '****');
+        const word = w.trim();
+        if (word && word.length > 1) {
+            const regex = new RegExp(escapeRegExp(word), 'gi');
+            masked = masked.replace(regex, (match) => {
+                // স্পেস বাদে বাকি সব ক্যারেক্টারকে '*' বানিয়ে দেবে, কিন্তু স্পেস ঠিক রাখবে
+                return match.replace(/[^\s]/g, '*');
+            });
         }
     });
     return masked;
