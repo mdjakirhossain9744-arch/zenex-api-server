@@ -21,10 +21,9 @@ fastify.register(fastifyCors, {
 
 fastify.register(fastifyFormbody); 
 
-// 💥 ENABLE GLOBAL COMPRESSION (Reduces JSON Payload by 80%) 💥
 fastify.register(fastifyCompress, {
     global: true,
-    encodings: ['br', 'gzip', 'deflate'] // Brotli is highly optimized for slow networks
+    encodings: ['br', 'gzip', 'deflate'] 
 });
 
 const connectDB = async () => {
@@ -47,7 +46,6 @@ const apiAuthCache = new Map();
 const globalWorkerUserCache = new Map(); 
 const userOtpResponseCache = new Map(); 
 
-// 💥 BOSS UPGRADE: FAST MASKING CACHE 💥
 let cachedMaskingSettings = { keywords: [], expiry: 0 };
 async function getMaskingKeywords() {
     if (Date.now() < cachedMaskingSettings.expiry) return cachedMaskingSettings.keywords;
@@ -62,19 +60,17 @@ async function getMaskingKeywords() {
     }
 }
 
-// 💥 BOSS UPGRADE: STRICT OTP EXTRACTOR (4-8 DIGITS + 00000 FALLBACK) 💥
+// 💥 BOSS UPGRADE: STRICT OTP EXTRACTOR FOR DASHBOARD DB ONLY 💥
 const extractStrictOTP = (rawText) => {
     if (!rawText) return "00000";
     const match = rawText.match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)/);
     return match ? match[0].trim() : "00000";
 };
 
-// 💥 BOSS UPGRADE: REGEX ESCAPER 💥
 const escapeRegExp = (string) => {
     return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 };
 
-// 💥 BOSS UPGRADE: DYNAMIC STAR & SPACE PRESERVER ENGINE 💥
 const applyMasking = (text, keywords) => {
     if (!text) return text;
     let masked = text;
@@ -125,7 +121,6 @@ const extractServiceName = (msg) => {
     if (!msg) return "Other";
     const text = msg.toLowerCase();
 
-    // 💥 UPGRADE 1: GLOBAL SERVICE DETECTION ENGINE (Hashes, Short URLs, Foreign Languages) 💥
     if (text.includes('facebook') || text.includes(' fb ') || text.includes('facebk') || text.includes('fb.me') || text.includes('h29q+fsn4sr') || text.includes('laz+nxcarlw') || text.includes('فيسبوك') || text.includes('फेसबुक') || text.includes('ফেসবুক') || text.includes('脸书') || text.includes('ፌስቡክ') || text.includes('ფეისბუქი')) return 'Facebook';
     if (text.includes('whatsapp') || text.includes(' wa ') || text.includes('vwaq') || text.includes('wa.me') || text.includes('واتساب') || text.includes('वाट्सएप') || text.includes('হোয়াটসঅ্যাপ') || text.includes('వాట్సాప్') || text.includes('왓츠앱')) return 'WhatsApp';
     if (text.includes('telegram') || text.includes('t.me') || text.includes('تيليجرام') || text.includes('टेलीग्राम') || text.includes('টেলিগ্রাম') || text.includes('телеграм') || text.includes('电报') || text.includes('ቴሌግራም')) return 'Telegram';
@@ -189,9 +184,6 @@ const extractServiceName = (msg) => {
     return "Other"; 
 };
 
-// ==========================================
-// 1. GET NUMBER ENDPOINT 
-// ==========================================
 fastify.route({
     method: ['GET', 'POST'], 
     url: '/v1/getnum',
@@ -287,9 +279,6 @@ fastify.route({
     }
 });
 
-// ==========================================
-// 2. BACKGROUND OTP SYNC (Handled ONLY by the LEADER)
-// ==========================================
 let isSyncing = false;
 
 const syncMNITBackground = async () => {
@@ -400,11 +389,10 @@ const syncMNITBackground = async () => {
                         const digitCount = (incomingMsgRaw.match(/\d/g) || []).length;
                         if (digitCount < 3) continue; 
                         
-                        // 💥 UPGRADE 2: STRICT OTP EXTRACTOR (4-8 digits or 00000 fallback) 💥
+                        // 💥 DB SAVE: STRICT OTP ONLY 💥
                         let incomingCode = extractStrictOTP(incomingMsgRaw); 
 
-                        // 💥 CLEAN ARCHITECTURE: Do NOT append [Service: X] anymore 💥
-                        let finalMessageToSave = incomingMsgRaw;
+                        let finalMessageToSave = incomingMsgRaw; 
 
                         let user = globalWorkerUserCache.get(order.userEmail);
                         if (!user) {
@@ -442,7 +430,7 @@ const syncMNITBackground = async () => {
                                 { 
                                     $set: { 
                                         status: "DONE", 
-                                        otp: incomingCode, 
+                                        otp: incomingCode, // DB stores clean 00000 or 4-8 digits
                                         fullMessage: order.fullMessage && order.fullMessage !== "Waiting..." ? order.fullMessage + " _||_ " + finalMessageToSave : finalMessageToSave,
                                         expireAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) 
                                     },
@@ -509,6 +497,7 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
 
         if (!user || !user.isApiActive) return reply.status(401).send({ meta: { status: "error" }, message: "Unauthorized" });
 
+        const hiddenKeywords = await getMaskingKeywords();
         const twentyMinutesAgo = new Date(Date.now() - 20 * 60 * 1000);
         
         const recentOrders = await Order.find({
@@ -525,28 +514,25 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
             const numberClean = String(order.displayNumber || order.searchNumber || "").replace(/\D/g, "");
             const baseNid = "ZX_" + order._id.toString().substring(0, 10).toUpperCase();
 
-            // 💥 THE BOSS FIX: STRICT EXTRACTOR SO USERS NEVER SEE RAW MESSAGE 💥
+            // 💥 THE BOSS FIX: REVERTED TO FULL MASKED MESSAGE FOR API BUYERS 💥
             if (order.fullMessage && order.fullMessage.includes("_||_")) {
                 const msgsArray = order.fullMessage.split("_||_").map(m => m.trim()).filter(Boolean);
                 msgsArray.forEach((msg, idx) => {
-                    let pureOtp = extractStrictOTP(msg);
                     expandedOtps.push({ 
                         nid: `${baseNid}_${idx}`, number: numberClean, 
-                        otp: pureOtp, // Never return full message
+                        otp: applyMasking(msg, hiddenKeywords), 
                         country: order.country || "Unknown", operator: order.operator || "Any", created_at: formattedDate 
                     });
                 });
             } else {
-                let pureOtp = extractStrictOTP(order.fullMessage || order.otp || "");
                 expandedOtps.push({ 
                     nid: baseNid, number: numberClean, 
-                    otp: pureOtp, // Never return full message
+                    otp: applyMasking(order.fullMessage || order.otp || "", hiddenKeywords), 
                     country: order.country || "Unknown", operator: order.operator || "Any", created_at: formattedDate 
                 });
             }
         });
 
-        // '00000' will pass this filter and reach the user.
         const validOtps = expandedOtps.filter(o => o.otp && o.otp.trim() !== "" && !["waiting...", "pending", "null"].includes(o.otp.toLowerCase()));
         userOtpResponseCache.set(cleanKey, { otps: validOtps, expiry: Date.now() + 3000 });
         return reply.status(200).send({ meta: { status: "success", code: 200 }, data: { otps: validOtps } });
@@ -564,7 +550,6 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
             return reply.send({ success: true, cached: true, data: cachedActiveData });
         }
 
-        // 💥 BOSS UPGRADE: MASKING FOR MANAGER/ADMIN ACTIVE RANGES 💥
         const hiddenKeywords = await getMaskingKeywords();
 
         const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
@@ -574,7 +559,7 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
         recentOrders.forEach((o) => {
             let msg = o.fullMessage || o.otp || "";
             const rawService = extractServiceName(msg);
-            const maskedService = applyMasking(rawService, hiddenKeywords); // 🛡️ Service MASKED
+            const maskedService = applyMasking(rawService, hiddenKeywords); 
 
             let num = o.searchNumber || o.number || "";
             num = String(num).replace("+", "");
@@ -590,7 +575,7 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
                     }
                 }
                 
-                const maskedTag = applyMasking(tag, hiddenKeywords); // 🛡️ Tag MASKED
+                const maskedTag = applyMasking(tag, hiddenKeywords); 
 
                 const key = `${rangeStr}|${maskedService}|${maskedTag}`;
                 if (!rangeMap[key]) rangeMap[key] = { range: rangeStr, service: maskedService, tag: maskedTag, hits: 0 };
@@ -623,14 +608,14 @@ fastify.get('/v1/user/today-otps', async (request, reply) => {
         
         if (!user) return reply.status(401).send({ error: "Invalid API Key" });
 
+        const hiddenKeywords = await getMaskingKeywords();
         const todayStr = getUTCDateString();
         const orders = await Order.find({ userEmail: user.email, dateString: todayStr, status: "DONE" }).select("displayNumber otp fullMessage -_id").lean();
         if (orders.length === 0) return reply.type('text/plain').send("NO_DATA");
         
-        // 💥 BOSS UPGRADE: TEXT EXPORT EXTRACTS STRICT OTP 💥
+        // 💥 BOSS UPGRADE: REVERTED TO FULL MASKED MESSAGE FOR TEXT EXPORT 💥
         const textData = orders.map((o) => {
-            let pureOtp = extractStrictOTP(o.fullMessage || o.otp || "");
-            return `${String(o.displayNumber).replace(/\D/g, "")}|${pureOtp}`;
+            return `${String(o.displayNumber).replace(/\D/g, "")}|${applyMasking(o.fullMessage || o.otp || "", hiddenKeywords)}`;
         }).join('\n');
         
         return reply.type('text/plain').send(textData);
