@@ -284,7 +284,8 @@ let isSyncing = false;
 const syncMNITBackground = async () => {
     if (isSyncing) return; 
 
-    const lockAcquired = await redis.set("master_otp_sync_lock", "locked", "NX", "EX", 4);
+    // 💥 BOSS SPEED UPGRADE: REDUCED REDIS LOCK TO 2 SECONDS FOR FASTER POLLING 💥
+    const lockAcquired = await redis.set("master_otp_sync_lock", "locked", "NX", "EX", 2);
     if (!lockAcquired) return; 
 
     isSyncing = true;
@@ -430,7 +431,7 @@ const syncMNITBackground = async () => {
                                 { 
                                     $set: { 
                                         status: "DONE", 
-                                        otp: incomingCode, // DB stores clean 00000 or 4-8 digits
+                                        otp: incomingCode, 
                                         fullMessage: order.fullMessage && order.fullMessage !== "Waiting..." ? order.fullMessage + " _||_ " + finalMessageToSave : finalMessageToSave,
                                         expireAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) 
                                     },
@@ -469,7 +470,8 @@ const syncMNITBackground = async () => {
     }
 };
 
-setInterval(syncMNITBackground, 5000); 
+// 💥 BOSS SPEED UPGRADE: CRON RUNS EVERY 2.5 SECONDS FOR ULTRA-LOW LATENCY 💥
+setInterval(syncMNITBackground, 2500); 
 
 // ==========================================
 // USER API ENDPOINTS
@@ -514,27 +516,38 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
             const numberClean = String(order.displayNumber || order.searchNumber || "").replace(/\D/g, "");
             const baseNid = "ZX_" + order._id.toString().substring(0, 10).toUpperCase();
 
-            // 💥 THE BOSS FIX: REVERTED TO FULL MASKED MESSAGE FOR API BUYERS 💥
-            if (order.fullMessage && order.fullMessage.includes("_||_")) {
-                const msgsArray = order.fullMessage.split("_||_").map(m => m.trim()).filter(Boolean);
+            // 💥 BOSS UPGRADE: UNIFORM NID INDEXING FOR ALL OTPS (ZERO MEMORY LEAK) 💥
+            let rawMsg = order.fullMessage || order.otp || "";
+            if (rawMsg.includes("_||_")) {
+                const msgsArray = rawMsg.split("_||_").map(m => m.trim()).filter(Boolean);
                 msgsArray.forEach((msg, idx) => {
                     expandedOtps.push({ 
-                        nid: `${baseNid}_${idx}`, number: numberClean, 
+                        nid: `${baseNid}_${idx}`, 
+                        number: numberClean, 
                         otp: applyMasking(msg, hiddenKeywords), 
-                        country: order.country || "Unknown", operator: order.operator || "Any", created_at: formattedDate 
+                        country: order.country || "Unknown", 
+                        operator: order.operator || "Any", 
+                        created_at: formattedDate 
                     });
                 });
             } else {
+                // For single OTP, we also strictly append _0 to maintain standard format for bots
                 expandedOtps.push({ 
-                    nid: baseNid, number: numberClean, 
-                    otp: applyMasking(order.fullMessage || order.otp || "", hiddenKeywords), 
-                    country: order.country || "Unknown", operator: order.operator || "Any", created_at: formattedDate 
+                    nid: `${baseNid}_0`, 
+                    number: numberClean, 
+                    otp: applyMasking(rawMsg, hiddenKeywords), 
+                    country: order.country || "Unknown", 
+                    operator: order.operator || "Any", 
+                    created_at: formattedDate 
                 });
             }
         });
 
         const validOtps = expandedOtps.filter(o => o.otp && o.otp.trim() !== "" && !["waiting...", "pending", "null"].includes(o.otp.toLowerCase()));
-        userOtpResponseCache.set(cleanKey, { otps: validOtps, expiry: Date.now() + 3000 });
+        
+        // 💥 BOSS SPEED UPGRADE: CACHE REDUCED TO 1.5 SECONDS FOR REAL-TIME DELIVERY 💥
+        userOtpResponseCache.set(cleanKey, { otps: validOtps, expiry: Date.now() + 1500 });
+        
         return reply.status(200).send({ meta: { status: "success", code: 200 }, data: { otps: validOtps } });
 
     } catch (error) { return reply.status(500).send({ meta: { status: "error" } }); }
