@@ -197,8 +197,10 @@ fastify.route({
     }
 });
 
-const processIncomingOTP = async (trunkTxId, text, senderId, destNum) => {
-    if (!text) return;
+const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum) => {
+    if (!rawText) return;
+    
+    const text = rawText.replace(/<#>\s*/g, '').trim();
     const cleanDestNum = String(destNum).replace('+', '');
     const query = { $or: [] };
     if (trunkTxId) query.$or.push({ trxId: String(trunkTxId) });
@@ -244,9 +246,12 @@ const processIncomingOTP = async (trunkTxId, text, senderId, destNum) => {
                 }
             } catch (balanceErr) {}
 
+            let detectedService = extractServiceName(text);
+            let finalTrueService = detectedService !== "Other" ? detectedService : (senderId && senderId !== "Unknown" ? senderId : "Other");
+
             if (baseOrder.status === "WAIT") {
                 baseOrder.status = "DONE"; baseOrder.otp = strictOtp; baseOrder.fullMessage = text; 
-                baseOrder.trueService = senderId || extractServiceName(text); baseOrder.orderCost = userEarned; baseOrder.orderCommission = agentEarned; 
+                baseOrder.trueService = finalTrueService; baseOrder.orderCost = userEarned; baseOrder.orderCommission = agentEarned; 
                 await baseOrder.save();
                 console.log(`✅ [DELIVERED] OTP for ${destNum}`);
             } else {
@@ -254,7 +259,7 @@ const processIncomingOTP = async (trunkTxId, text, senderId, destNum) => {
                     userEmail: baseOrder.userEmail, userName: baseOrder.userName, userUid: baseOrder.userUid, agentEmail: baseOrder.agentEmail,
                     searchNumber: baseOrder.searchNumber, displayNumber: baseOrder.displayNumber, country: baseOrder.country, operator: baseOrder.operator,
                     dateString: baseOrder.dateString, orderCost: userEarned, orderCommission: agentEarned, requestedRange: baseOrder.requestedRange,
-                    trxId: baseOrder.trxId, status: "DONE", otp: strictOtp, fullMessage: text, trueService: senderId || extractServiceName(text), expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
+                    trxId: baseOrder.trxId, status: "DONE", otp: strictOtp, fullMessage: text, trueService: finalTrueService, expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
                 });
                 await newMultiOrder.save();
             }
@@ -262,41 +267,42 @@ const processIncomingOTP = async (trunkTxId, text, senderId, destNum) => {
     }
 };
 
-// 💥 CLUSTER-SAFE RESCUE ENGINE (Uses Redis Lock to prevent duplicate API calls) 💥
+// 💥 THE MASTERSTROKE ENGINE (1 Call, 60 OTPs) 💥
 let isPollingIPRN = false;
 const pollIPRNPendingOrders = async () => {
     if (isPollingIPRN) return;
     
-    // 💥 REDIS LOCK: Ensures only 1 PM2 instance does the polling 💥
-    const lockAcquired = await redis.set("iprn_poll_lock", "locked", "NX", "EX", 2);
+    const lockAcquired = await redis.set("iprn_poll_lock", "locked", "NX", "EX", 3);
     if (!lockAcquired) return; 
 
     isPollingIPRN = true;
     try {
-        const twentyMinsAgo = new Date(Date.now() - 20 * 60 * 1000); 
+        const payload = { 
+            jsonrpc: "2.0", 
+            method: "sms.mdr_full:get_list", 
+            params: { limit: 60 }, 
+            id: Date.now() 
+        };
         
-        const pendingOrders = await Order.find({ 
-            status: "WAIT", 
-            trxId: { $ne: "", $exists: true }, 
-            createdAt: { $gte: twentyMinsAgo } 
-        }).sort({ _id: -1 }).limit(40).lean();
-
-        if (pendingOrders.length > 0) {
-            console.log(`\n🔍 [CLUSTER LEADER] Scanning IPRN for ${pendingOrders.length} pending numbers...`);
-            
-            const parallelTasks = pendingOrders.map(async (order) => {
-                try {
-                    const payload = { jsonrpc: "2.0", method: "sms.realtime:get_message", params: { message_id: order.trxId }, id: Date.now() };
-                    const res = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-                    const data = await res.json();
-                    
-                    if (data?.result?.reply === "success" && data.result.message) {
-                        console.log(`⚡ [SNATCHED] TrxID: ${order.trxId} -> ${data.result.message}`);
-                        await processIncomingOTP(order.trxId, data.result.message, "Unknown", order.searchNumber);
-                    }
-                } catch(e) {}
-            });
-            await Promise.allSettled(parallelTasks);
+        const res = await fetch(IPRN_API_URL, { 
+            method: "POST", 
+            headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, 
+            body: JSON.stringify(payload) 
+        });
+        const data = await res.json();
+        
+        const messages = data?.result?.mdr_full_list || [];
+        if (messages.length > 0) {
+            for (const msg of messages) {
+                const trunkTxId = msg.message_id || "";
+                const text = msg.message || "";
+                const senderId = msg.senderid || "Unknown";
+                const destNum = msg.phone || "";
+                
+                if (text && destNum) {
+                    await processIncomingOTP(trunkTxId, text, senderId, destNum);
+                }
+            }
         }
     } catch (error) {
         console.error("Rescue Engine Error:", error.message);
@@ -304,10 +310,9 @@ const pollIPRNPendingOrders = async () => {
         isPollingIPRN = false;
     }
 };
-// Runs every 3 seconds safely across clusters
-setInterval(pollIPRNPendingOrders, 3000);
+// Runs every 3.5 seconds across clusters (Maximum Efficiency!)
+setInterval(pollIPRNPendingOrders, 3500);
 
-// 💥 WEBHOOK (Waiting for Andrew to fix his end) 💥
 fastify.route({
     method: ['GET', 'POST'],
     url: '/v1/webhook/iprn-receive',
@@ -377,7 +382,7 @@ const startServer = async () => {
         await connectDB();
         await fetchSdeList(); 
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V7 (Extreme Rescue Active) is LIVE at: http://localhost:${process.env.PORT || 4000}`);
+        console.log(`⚡ ZENEX Microservice V7 (Masterstroke Rescue Active) is LIVE at: http://localhost:${process.env.PORT || 4000}`);
     } catch (err) { process.exit(1); }
 };
 startServer();
