@@ -38,7 +38,6 @@ const connectDB = async () => {
 
 const getUTCDateString = (dateObj = new Date()) => new Date(dateObj).toISOString().split('T')[0];
 
-// 💥 IPRN ELITE INTEGRATION 💥
 const IPRN_API_URL = "https://api.iprn-elite.com/v1.0";
 const IPRN_API_KEY = process.env.IPRN_API_KEY || "1ddOYcGxRcWUlyi6T7oZzA"; 
 
@@ -46,28 +45,14 @@ const globalSdeMap = new Map();
 
 const fetchSdeList = async () => {
     try {
-        const payload = { 
-            jsonrpc: "2.0", 
-            method: "sms.realtime:get_subdestination_list", 
-            params: {}, 
-            id: Date.now() 
-        };
-        const res = await fetch(IPRN_API_URL, { 
-            method: "POST", 
-            headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, 
-            body: JSON.stringify(payload) 
-        });
+        const payload = { jsonrpc: "2.0", method: "sms.realtime:get_subdestination_list", params: {}, id: Date.now() };
+        const res = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
         const data = await res.json();
-
         if (data?.result?.subdestination_list) {
-            data.result.subdestination_list.forEach(item => { 
-                globalSdeMap.set(item.sde_key, item.name); 
-            });
+            data.result.subdestination_list.forEach(item => { globalSdeMap.set(item.sde_key, item.name); });
             console.log(`✅ IPRN SDE Dictionary Loaded: ${globalSdeMap.size} destinations cached.`);
         }
-    } catch (e) {
-        console.error("⚠️ Failed to load SDE list:", e.message);
-    }
+    } catch (e) {}
 };
 
 const apiAuthCache = new Map();
@@ -81,11 +66,8 @@ async function getMaskingKeywords() {
         const db = mongoose.connection.db;
         const settings = await db.collection("system_settings").findOne({ type: "global" });
         const kw = settings?.hiddenKeywords || [];
-        cachedMaskingSettings = { keywords: kw, expiry: Date.now() + 60000 }; 
-        return kw;
-    } catch (e) {
-        return cachedMaskingSettings.keywords;
-    }
+        cachedMaskingSettings = { keywords: kw, expiry: Date.now() + 60000 }; return kw;
+    } catch (e) { return cachedMaskingSettings.keywords; }
 }
 
 const extractStrictOTP = (rawText) => {
@@ -94,9 +76,7 @@ const extractStrictOTP = (rawText) => {
     return match ? match[0].trim() : "00000";
 };
 
-const escapeRegExp = (string) => {
-    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-};
+const escapeRegExp = (string) => string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const applyMasking = (text, keywords) => {
     if (!text) return text;
@@ -105,9 +85,7 @@ const applyMasking = (text, keywords) => {
         const word = w.trim();
         if (word && word.length > 1) {
             const regex = new RegExp(escapeRegExp(word), 'gi');
-            masked = masked.replace(regex, (match) => {
-                return match.replace(/[^\s]/g, '*');
-            });
+            masked = masked.replace(regex, (match) => match.replace(/[^\s]/g, '*'));
         }
     });
     return masked;
@@ -115,12 +93,8 @@ const applyMasking = (text, keywords) => {
 
 setInterval(() => {
     const now = Date.now();
-    for (const [key, value] of apiAuthCache.entries()) {
-        if (now > value.expiry) apiAuthCache.delete(key);
-    }
-    for (const [key, value] of userOtpResponseCache.entries()) {
-        if (now > value.expiry) userOtpResponseCache.delete(key);
-    }
+    for (const [key, value] of apiAuthCache.entries()) { if (now > value.expiry) apiAuthCache.delete(key); }
+    for (const [key, value] of userOtpResponseCache.entries()) { if (now > value.expiry) userOtpResponseCache.delete(key); }
 }, 30000); 
 
 setInterval(() => { globalWorkerUserCache.clear(); }, 5 * 60 * 1000); 
@@ -128,9 +102,7 @@ setInterval(() => { globalWorkerUserCache.clear(); }, 5 * 60 * 1000);
 async function triggerBinanceAutoPay(user) {
     try {
         const res = await fetch(`${process.env.MAIN_SITE_URL}/api/cron/process-binance-payout`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ userId: user._id })
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId: user._id })
         });
         const result = await res.json().catch(() => ({}));
         if (result && result.success === false) {
@@ -147,7 +119,6 @@ async function triggerBinanceAutoPay(user) {
 const extractServiceName = (msg) => {
     if (!msg) return "Other";
     const text = msg.toLowerCase();
-
     if (text.includes('facebook') || text.includes(' fb ') || text.includes('facebk') || text.includes('fb.me')) return 'Facebook';
     if (text.includes('whatsapp') || text.includes(' wa ') || text.includes('vwaq') || text.includes('wa.me')) return 'WhatsApp';
     if (text.includes('telegram') || text.includes('t.me')) return 'Telegram';
@@ -164,13 +135,9 @@ const extractServiceName = (msg) => {
     if (text.includes('amazon')) return 'Amazon';
     if (text.includes('netflix')) return 'Netflix';
     if (text.includes('uber')) return 'Uber';
-    
     return "Other"; 
 };
 
-// ==========================================
-// USER API ENDPOINTS (MODIFIED FOR IPRN)
-// ==========================================
 fastify.route({
     method: ['GET', 'POST'], 
     url: '/v1/getnum',
@@ -180,7 +147,6 @@ fastify.route({
             if (!apiKey || apiKey.trim().length < 10) return reply.status(401).send({ meta: { status: "error" }, message: "Invalid API Key" });
 
             const cleanKey = apiKey.trim();
-            
             let cachedObj = apiAuthCache.get(cleanKey);
             let user;
 
@@ -188,9 +154,7 @@ fastify.route({
                 user = await User.findOne({ apiKey: cleanKey }).lean();
                 if (!user || !user.isApiActive || user.status !== "active") return reply.status(403).send({ meta: { status: "error" }, message: "Unauthorized" });
                 apiAuthCache.set(cleanKey, { user, expiry: Date.now() + 60000 });
-            } else {
-                user = cachedObj.user;
-            }
+            } else { user = cachedObj.user; }
 
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 10000); 
@@ -207,23 +171,8 @@ fastify.route({
 
             let response;
             try {
-                const payload = { 
-                    jsonrpc: "2.0", 
-                    method: "sms.realtime:allocate", 
-                    params: { 
-                        senderid: "OTP", 
-                        prefix_list: [String(rid).toUpperCase().replace(/X/g, '')], 
-                        dont_check_access: true 
-                    }, 
-                    id: Date.now() 
-                };
-                
-                response = await fetch(IPRN_API_URL, {
-                    method: "POST",
-                    headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" },
-                    body: JSON.stringify(payload),
-                    signal: controller.signal
-                });
+                const payload = { jsonrpc: "2.0", method: "sms.realtime:allocate", params: { senderid: "OTP", prefix_list: [String(rid).toUpperCase().replace(/X/g, '')], dont_check_access: true }, id: Date.now() };
+                response = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: controller.signal });
                 clearTimeout(timeoutId);
             } catch (fetchError) {
                 clearTimeout(timeoutId);
@@ -240,90 +189,56 @@ fastify.route({
                 
                 let exactCountry = "Unknown";
                 let exactOperator = "Mobile"; 
-                
                 if (data.result.sde_key && globalSdeMap.has(data.result.sde_key)) {
                     let rawName = globalSdeMap.get(data.result.sde_key);
                     rawName = rawName.replace(/\s*\([\d+X]+\)\s*$/g, '').trim();
                     const parts = rawName.split(' - ');
                     exactCountry = parts[0] ? parts[0].trim() : "Unknown";
-                    
                     if (parts.length >= 3) { exactOperator = parts[2].trim(); } 
                     else if (parts.length === 2) { exactOperator = parts[1].trim().toLowerCase() === "mobile" ? "Mobile" : parts[1].trim(); }
                 }
 
                 const todayStr = getUTCDateString();
-                
                 setImmediate(() => {
                     const newOrder = new Order({
-                        userEmail: user.email,
-                        searchNumber: fullNumStr,
-                        displayNumber: `+${fullNumStr}`,
-                        requestedRange: rid,
-                        trxId: String(trxId),
-                        country: exactCountry,
-                        operator: exactOperator,
-                        status: "WAIT",
-                        fullMessage: "Waiting...",
-                        otp: "Waiting...", 
-                        dateString: todayStr,
-                        expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
+                        userEmail: user.email, searchNumber: fullNumStr, displayNumber: `+${fullNumStr}`, requestedRange: rid,
+                        trxId: String(trxId), country: exactCountry, operator: exactOperator, status: "WAIT",
+                        fullMessage: "Waiting...", otp: "Waiting...", dateString: todayStr, expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
                     });
                     newOrder.save().catch(() => {});
                 });
                 
                 return reply.status(200).send({
                     meta: { status: "success", code: 200 },
-                    data: {
-                        copy: `+${fullNumStr}`,
-                        number: `+${fullNumStr}`,
-                        full_number: fullNumStr,
-                        country: exactCountry,
-                        iso: "Unknown",
-                        operator: exactOperator,
-                        status: "pending"
-                    }
+                    data: { copy: `+${fullNumStr}`, number: `+${fullNumStr}`, full_number: fullNumStr, country: exactCountry, iso: "Unknown", operator: exactOperator, status: "pending" }
                 });
             }
-
             return reply.status(400).send({ meta: { status: "error" }, message: data.error?.message || "Out of stock or Invalid Range" });
-        } catch (error) {
-            return reply.status(500).send({ meta: { status: "error" }, message: "Server Error" });
-        }
+        } catch (error) { return reply.status(500).send({ meta: { status: "error" }, message: "Server Error" }); }
     }
 });
 
-// ==========================================
-// 💥 SECURE IPRN WEBHOOK LOGIC (LIVE TRACKER ENABLED) 💥
-// ==========================================
 const processIncomingOTP = async (trunkTxId, text, senderId, destNum) => {
     if (!text) return;
-    
     const cleanDestNum = String(destNum).replace('+', '');
     const query = { $or: [] };
     if (trunkTxId) query.$or.push({ trxId: String(trunkTxId) });
     if (cleanDestNum) query.$or.push({ searchNumber: cleanDestNum }, { displayNumber: `+${cleanDestNum}` });
-    
     if (query.$or.length === 0) return;
 
     const existingOrders = await Order.find(query).sort({ _id: -1 }).limit(3);
-    
     if (existingOrders.length > 0) {
         let baseOrder = existingOrders.find(o => o.status === "WAIT");
         if (!baseOrder) baseOrder = existingOrders[0]; 
 
         const orderAgeInMs = Date.now() - new Date(baseOrder.createdAt).getTime();
-        if (orderAgeInMs > 25 * 60 * 1000 || baseOrder.status === "FAIL" || baseOrder.status === "CANCEL") {
-            console.log(`⚠️ [OTP IGNORED] Order too old or canceled. ID: ${baseOrder._id}`);
-            return; 
-        }
+        if (orderAgeInMs > 25 * 60 * 1000 || baseOrder.status === "FAIL" || baseOrder.status === "CANCEL") return; 
         
         const strictOtp = extractStrictOTP(text);
         const isDuplicate = existingOrders.some(o => o.fullMessage === text || (o.fullMessage && o.fullMessage.includes(text)) || o.otp === strictOtp);
         
         if (!isDuplicate) {
-            let userEarned = 0;
-            let agentEarned = 0;
-            
+            let userEarned = 0; let agentEarned = 0;
             try {
                 const actualUser = await User.findOne({ email: baseOrder.userEmail }).lean();
                 if (actualUser) {
@@ -334,11 +249,7 @@ const processIncomingOTP = async (trunkTxId, text, senderId, destNum) => {
                     
                     let actualAgent = null;
                     if (!isFreeService && actualUser.agentEmail && actualUser.agentEmail !== "admin") {
-                        actualAgent = await User.findOne({ 
-                            $or: [ { email: actualUser.agentEmail }, { customAgentMail: actualUser.agentEmail } ], 
-                            role: "agent" 
-                        }).lean();
-                        
+                        actualAgent = await User.findOne({ $or: [ { email: actualUser.agentEmail }, { customAgentMail: actualUser.agentEmail } ], role: "agent" }).lean();
                         if (actualAgent) {
                             const aRate = Number(actualAgent.agentMaxRate || 0.70);
                             const profit = Math.max(0, Number((aRate - userEarned).toFixed(4)));
@@ -347,95 +258,94 @@ const processIncomingOTP = async (trunkTxId, text, senderId, destNum) => {
                     }
 
                     if (userEarned > 0) {
-                        const updatedUser = await User.findOneAndUpdate(
-                            { _id: actualUser._id }, 
-                            { $inc: { balance: userEarned } }, 
-                            { returnDocument: 'after' } // 💥 Fixed Deprecation Warning 💥
-                        );
-
-                        if (updatedUser && (updatedUser.autoPayEnabled === true || updatedUser.autoPayEnabled === "true") && updatedUser.balance >= 150) {
-                            triggerBinanceAutoPay(updatedUser).catch(() => {});
-                        }
+                        const updatedUser = await User.findOneAndUpdate({ _id: actualUser._id }, { $inc: { balance: userEarned } }, { returnDocument: 'after' });
+                        if (updatedUser && (updatedUser.autoPayEnabled === true || updatedUser.autoPayEnabled === "true") && updatedUser.balance >= 150) { triggerBinanceAutoPay(updatedUser).catch(() => {}); }
                     }
-                    if (agentEarned > 0 && actualAgent) {
-                        await User.updateOne({ _id: actualAgent._id }, { $inc: { balance: agentEarned, agentEarning: agentEarned } });
-                    }
+                    if (agentEarned > 0 && actualAgent) { await User.updateOne({ _id: actualAgent._id }, { $inc: { balance: agentEarned, agentEarning: agentEarned } }); }
                 }
-            } catch (balanceErr) {
-                console.error("Balance Update Error:", balanceErr);
-            }
+            } catch (balanceErr) {}
 
             if (baseOrder.status === "WAIT") {
-                baseOrder.status = "DONE"; 
-                baseOrder.otp = strictOtp; 
-                baseOrder.fullMessage = text; 
-                baseOrder.trueService = senderId || extractServiceName(text);
-                baseOrder.orderCost = userEarned; 
-                baseOrder.orderCommission = agentEarned; 
+                baseOrder.status = "DONE"; baseOrder.otp = strictOtp; baseOrder.fullMessage = text; 
+                baseOrder.trueService = senderId || extractServiceName(text); baseOrder.orderCost = userEarned; baseOrder.orderCommission = agentEarned; 
                 await baseOrder.save();
-                console.log(`✅ [OTP MATCHED & SAVED] Order Updated to DONE!`);
+                console.log(`✅ [OTP MATCHED] Delivered to Dashboard: ${text}`);
             } else {
                 const newMultiOrder = new Order({
-                    userEmail: baseOrder.userEmail, 
-                    userName: baseOrder.userName, 
-                    userUid: baseOrder.userUid, 
-                    agentEmail: baseOrder.agentEmail,
-                    searchNumber: baseOrder.searchNumber, 
-                    displayNumber: baseOrder.displayNumber, 
-                    country: baseOrder.country, 
-                    operator: baseOrder.operator,
-                    dateString: baseOrder.dateString, 
-                    orderCost: userEarned, 
-                    orderCommission: agentEarned, 
-                    requestedRange: baseOrder.requestedRange,
-                    trxId: baseOrder.trxId, 
-                    status: "DONE", 
-                    otp: strictOtp, 
-                    fullMessage: text, 
-                    trueService: senderId || extractServiceName(text), 
-                    expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
+                    userEmail: baseOrder.userEmail, userName: baseOrder.userName, userUid: baseOrder.userUid, agentEmail: baseOrder.agentEmail,
+                    searchNumber: baseOrder.searchNumber, displayNumber: baseOrder.displayNumber, country: baseOrder.country, operator: baseOrder.operator,
+                    dateString: baseOrder.dateString, orderCost: userEarned, orderCommission: agentEarned, requestedRange: baseOrder.requestedRange,
+                    trxId: baseOrder.trxId, status: "DONE", otp: strictOtp, fullMessage: text, trueService: senderId || extractServiceName(text), expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
                 });
                 await newMultiOrder.save();
-                console.log(`✅ [MULTI-OTP MATCHED & SAVED] New Row Created!`);
             }
-        } else {
-            console.log(`⚠️ [OTP DUPLICATE] Duplicate OTP ignored for: ${destNum}`);
         }
-    } else {
-        console.log(`❌ [OTP ORPHAN] No matching order found for Number: ${destNum} | TrxId: ${trunkTxId}`);
     }
 };
 
-fastify.post('/v1/webhook/iprn-receive', async (request, reply) => {
+// 💥 BOSS UPGRADE: AUTO-POLLING FALLBACK ENGINE 💥
+// This will force-pull the OTP from IPRN even if the webhook fails to reach us!
+let isPollingIPRN = false;
+const pollIPRNPendingOrders = async () => {
+    if (isPollingIPRN) return;
+    isPollingIPRN = true;
     try {
-        const clientIP = request.ip;
-        const data = request.body || {};
-        
-        // 💥 DEBUG LOGGER: Now we can see EXACTLY what IPRN sends 💥
-        console.log(`\n🔥 [WEBHOOK HIT] Incoming from IP: ${clientIP}`);
-        console.log(`📦 [PAYLOAD]`, JSON.stringify(data));
-        
-        const trunkTxId = data.message_id || data.trunk_number_transaction_id || data.trxId;
-        const text = data.text || data.message || data.content;
-        const senderId = data.senderid || data.source_addr || "Unknown";
-        const destNum = data.destination_addr || data.number || data.b_number;
-        
-        if (!text) {
-            console.log("⚠️ [WEBHOOK ERROR] No text found in payload.");
-            return reply.status(400).send({ success: false, message: "No text found in payload" });
+        const tenMinsAgo = new Date(Date.now() - 10 * 60 * 1000);
+        // Find orders waiting for OTP that have a valid message_id (trxId)
+        const pendingOrders = await Order.find({ 
+            status: "WAIT", 
+            trxId: { $ne: "" }, 
+            createdAt: { $gte: tenMinsAgo } 
+        }).sort({ _id: -1 }).limit(10).lean();
+
+        if (pendingOrders.length > 0) {
+            const parallelTasks = pendingOrders.map(async (order) => {
+                try {
+                    const payload = { jsonrpc: "2.0", method: "sms.realtime:get_message", params: { message_id: order.trxId }, id: Date.now() };
+                    const res = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+                    const data = await res.json();
+                    
+                    // If IPRN replies 'success', it means OTP has arrived!
+                    if (data?.result?.reply === "success" && data.result.message) {
+                        console.log(`⚡ [POLL ENGINE] Fetched OTP from IPRN for ${order.displayNumber}: ${data.result.message}`);
+                        await processIncomingOTP(order.trxId, data.result.message, "Unknown", order.searchNumber);
+                    }
+                } catch(e) {}
+            });
+            await Promise.allSettled(parallelTasks);
         }
-        
-        console.log(`⚡ [PROCESSING OTP] Number: ${destNum}, OTP: ${text}, Sender: ${senderId}`);
-        
-        processIncomingOTP(trunkTxId, text, senderId, destNum).catch(err => console.error("❌ DB ERROR:", err.message));
-        
-        return reply.status(200).send({ success: true, message: "Webhook received successfully" });
-    } catch (error) { 
-        console.error("❌ [WEBHOOK CRASH]", error.message);
-        return reply.status(500).send({ success: false, message: "Internal Server Error" }); 
+    } catch (error) {
+        console.error("Polling Error:", error.message);
+    } finally {
+        isPollingIPRN = false;
+    }
+};
+// Run the poll engine every 4 seconds
+setInterval(pollIPRNPendingOrders, 4000);
+
+// 💥 WEBHOOK (Fixed to accept GET & POST just in case) 💥
+fastify.route({
+    method: ['GET', 'POST'],
+    url: '/v1/webhook/iprn-receive',
+    handler: async (request, reply) => {
+        try {
+            const clientIP = request.ip;
+            const data = request.method === 'GET' ? request.query : (request.body || {});
+            
+            console.log(`\n🔥 [WEBHOOK HIT] IP: ${clientIP} | Payload:`, JSON.stringify(data));
+            
+            const trunkTxId = data.message_id || data.trunk_number_transaction_id || data.trxId;
+            const text = data.text || data.message || data.content;
+            const senderId = data.senderid || data.source_addr || "Unknown";
+            const destNum = data.destination_addr || data.number || data.b_number;
+            
+            if (!text) return reply.status(400).send({ success: false, message: "No text found in payload" });
+            
+            processIncomingOTP(trunkTxId, text, senderId, destNum).catch(console.error);
+            return reply.status(200).send({ success: true, message: "Webhook processed" });
+        } catch (error) { return reply.status(500).send({ success: false, message: "Internal Error" }); }
     }
 });
-
 
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
     try {
@@ -444,30 +354,19 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
         const cleanKey = apiKey.trim();
 
         const cachedOtpData = userOtpResponseCache.get(cleanKey);
-        if (cachedOtpData && Date.now() < cachedOtpData.expiry) {
-            return reply.status(200).send({ meta: { status: "success", code: 200 }, data: { otps: cachedOtpData.otps } });
-        }
+        if (cachedOtpData && Date.now() < cachedOtpData.expiry) return reply.status(200).send({ meta: { status: "success", code: 200 }, data: { otps: cachedOtpData.otps } });
 
-        let cachedObj = apiAuthCache.get(cleanKey);
-        let user;
-
+        let cachedObj = apiAuthCache.get(cleanKey); let user;
         if (!cachedObj || Date.now() > cachedObj.expiry) {
             user = await User.findOne({ apiKey: cleanKey }).select("email isApiActive").lean();
             if (user) apiAuthCache.set(cleanKey, { user, expiry: Date.now() + 60000 });
-        } else {
-            user = cachedObj.user;
-        }
+        } else { user = cachedObj.user; }
 
         if (!user || !user.isApiActive) return reply.status(401).send({ meta: { status: "error" }, message: "Unauthorized" });
 
         const hiddenKeywords = await getMaskingKeywords();
-        const twentyMinutesAgo = new Date(Date.now() - 20 * 60 * 1000);
-        
-        const recentOrders = await Order.find({
-            userEmail: user.email,
-            status: "DONE", 
-            updatedAt: { $gte: twentyMinutesAgo }
-        }).select("_id displayNumber searchNumber otp fullMessage country operator updatedAt createdAt status").sort({ updatedAt: -1 }).lean();
+        const recentOrders = await Order.find({ userEmail: user.email, status: "DONE", updatedAt: { $gte: new Date(Date.now() - 20 * 60 * 1000) } })
+            .select("_id displayNumber searchNumber otp fullMessage country operator updatedAt createdAt status").sort({ updatedAt: -1 }).lean();
 
         let expandedOtps = [];
         recentOrders.forEach(order => {
@@ -479,52 +378,27 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
 
             let rawMsg = order.fullMessage || order.otp || "";
             if (rawMsg.includes("_||_")) {
-                const msgsArray = rawMsg.split("_||_").map(m => m.trim()).filter(Boolean);
-                msgsArray.forEach((msg, idx) => {
-                    expandedOtps.push({ 
-                        nid: `${baseNid}_${idx}`, 
-                        number: numberClean, 
-                        otp: applyMasking(msg, hiddenKeywords), 
-                        country: order.country || "Unknown", 
-                        operator: order.operator || "Any", 
-                        created_at: formattedDate 
-                    });
+                rawMsg.split("_||_").map(m => m.trim()).filter(Boolean).forEach((msg, idx) => {
+                    expandedOtps.push({ nid: `${baseNid}_${idx}`, number: numberClean, otp: applyMasking(msg, hiddenKeywords), country: order.country || "Unknown", operator: order.operator || "Any", created_at: formattedDate });
                 });
-            } else {
-                expandedOtps.push({ 
-                    nid: `${baseNid}_0`, 
-                    number: numberClean, 
-                    otp: applyMasking(rawMsg, hiddenKeywords), 
-                    country: order.country || "Unknown", 
-                    operator: order.operator || "Any", 
-                    created_at: formattedDate 
-                });
-            }
+            } else { expandedOtps.push({ nid: `${baseNid}_0`, number: numberClean, otp: applyMasking(rawMsg, hiddenKeywords), country: order.country || "Unknown", operator: order.operator || "Any", created_at: formattedDate }); }
         });
 
         const validOtps = expandedOtps.filter(o => o.otp && o.otp.trim() !== "" && !["waiting...", "pending", "null"].includes(o.otp.toLowerCase()));
-        
         userOtpResponseCache.set(cleanKey, { otps: validOtps, expiry: Date.now() + 1500 });
-        
         return reply.status(200).send({ meta: { status: "success", code: 200 }, data: { otps: validOtps } });
-
     } catch (error) { return reply.status(500).send({ meta: { status: "error" } }); }
 });
 
-fastify.get('/v1/active-ranges', async (request, reply) => {
-    return reply.send({ success: true, data: [] });
-});
-
-fastify.get('/v1/user/today-otps', async (request, reply) => {
-    return reply.type('text/plain').send("NO_DATA");
-});
+fastify.get('/v1/active-ranges', async (request, reply) => reply.send({ success: true, data: [] }));
+fastify.get('/v1/user/today-otps', async (request, reply) => reply.type('text/plain').send("NO_DATA"));
 
 const startServer = async () => {
     try {
         await connectDB();
         await fetchSdeList(); 
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V7 (IPRN Webhook Protocol Active) is LIVE at: http://localhost:${process.env.PORT || 4000}`);
+        console.log(`⚡ ZENEX Microservice V7 (IPRN Auto-Poll + Webhook Active) is LIVE at: http://localhost:${process.env.PORT || 4000}`);
     } catch (err) { process.exit(1); }
 };
 startServer();
