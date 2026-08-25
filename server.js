@@ -12,28 +12,15 @@ dotenv.config();
 const fastify = Fastify({ logger: false, trustProxy: true });
 const redis = new Redis(); 
 
-fastify.register(fastifyCors, { 
-    origin: '*',
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'mapikey']
-});
-
+fastify.register(fastifyCors, { origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type', 'mapikey'] });
 fastify.register(fastifyFormbody); 
-
-fastify.register(fastifyCompress, {
-    global: true,
-    encodings: ['br', 'gzip', 'deflate'] 
-});
+fastify.register(fastifyCompress, { global: true, encodings: ['br', 'gzip', 'deflate'] });
 
 const connectDB = async () => {
     try {
-        const opts = { maxPoolSize: 150, minPoolSize: 10 };
-        await mongoose.connect(process.env.MONGODB_URI, opts);
-        console.log(`✅ ZENEX Database Connected to API Microservice! 🚀`);
-    } catch (error) {
-        console.error('❌ Database Connection Failed:', error);
-        process.exit(1);
-    }
+        await mongoose.connect(process.env.MONGODB_URI, { maxPoolSize: 150, minPoolSize: 10 });
+        console.log(`✅ ZENEX Database Connected! 🚀`);
+    } catch (error) { process.exit(1); }
 };
 
 const getUTCDateString = (dateObj = new Date()) => new Date(dateObj).toISOString().split('T')[0];
@@ -42,15 +29,12 @@ const IPRN_API_URL = "https://api.iprn-elite.com/v1.0";
 const IPRN_API_KEY = process.env.IPRN_API_KEY || "1ddOYcGxRcWUlyi6T7oZzA"; 
 
 const globalSdeMap = new Map();
-
 const fetchSdeList = async () => {
     try {
-        const payload = { jsonrpc: "2.0", method: "sms.realtime:get_subdestination_list", params: {}, id: Date.now() };
-        const res = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+        const res = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", method: "sms.realtime:get_subdestination_list", params: {}, id: Date.now() }) });
         const data = await res.json();
         if (data?.result?.subdestination_list) {
             data.result.subdestination_list.forEach(item => { globalSdeMap.set(item.sde_key, item.name); });
-            console.log(`✅ IPRN SDE Dictionary Loaded: ${globalSdeMap.size} destinations cached.`);
         }
     } catch (e) {}
 };
@@ -164,10 +148,7 @@ fastify.route({
             const rawRange = typeof reqData === 'string' ? reqData : (reqData.range || "");
             const rid = rawRange.replace(/x/gi, '').trim();
 
-            if (!rid) {
-                clearTimeout(timeoutId);
-                return reply.status(400).send({ meta: { status: "error" }, message: "Invalid Range Format" });
-            }
+            if (!rid) { clearTimeout(timeoutId); return reply.status(400).send({ meta: { status: "error" }, message: "Invalid Range Format" }); }
 
             let response;
             try {
@@ -175,8 +156,7 @@ fastify.route({
                 response = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: controller.signal });
                 clearTimeout(timeoutId);
             } catch (fetchError) {
-                clearTimeout(timeoutId);
-                return reply.status(504).send({ meta: { status: "error" }, message: "Provider is slow. Try again." });
+                clearTimeout(timeoutId); return reply.status(504).send({ meta: { status: "error" }, message: "Provider is slow. Try again." });
             }
 
             let data;
@@ -187,8 +167,7 @@ fastify.route({
                 const fullNumStr = String(data.result.number.full || "");
                 const localNumStr = String(data.result.number.local_number || fullNumStr);
                 
-                let exactCountry = "Unknown";
-                let exactOperator = "Mobile"; 
+                let exactCountry = "Unknown"; let exactOperator = "Mobile"; 
                 if (data.result.sde_key && globalSdeMap.has(data.result.sde_key)) {
                     let rawName = globalSdeMap.get(data.result.sde_key);
                     rawName = rawName.replace(/\s*\([\d+X]+\)\s*$/g, '').trim();
@@ -269,7 +248,7 @@ const processIncomingOTP = async (trunkTxId, text, senderId, destNum) => {
                 baseOrder.status = "DONE"; baseOrder.otp = strictOtp; baseOrder.fullMessage = text; 
                 baseOrder.trueService = senderId || extractServiceName(text); baseOrder.orderCost = userEarned; baseOrder.orderCommission = agentEarned; 
                 await baseOrder.save();
-                console.log(`✅ [RESCUED] OTP Delivered to User: ${destNum}`);
+                console.log(`✅ [DELIVERED] OTP for ${destNum}`);
             } else {
                 const newMultiOrder = new Order({
                     userEmail: baseOrder.userEmail, userName: baseOrder.userName, userUid: baseOrder.userUid, agentEmail: baseOrder.agentEmail,
@@ -283,22 +262,27 @@ const processIncomingOTP = async (trunkTxId, text, senderId, destNum) => {
     }
 };
 
-// 💥 EXTREME RESCUE POLLING ENGINE (Bypasses Webhook Completely) 💥
+// 💥 CLUSTER-SAFE RESCUE ENGINE (Uses Redis Lock to prevent duplicate API calls) 💥
 let isPollingIPRN = false;
 const pollIPRNPendingOrders = async () => {
     if (isPollingIPRN) return;
+    
+    // 💥 REDIS LOCK: Ensures only 1 PM2 instance does the polling 💥
+    const lockAcquired = await redis.set("iprn_poll_lock", "locked", "NX", "EX", 2);
+    if (!lockAcquired) return; 
+
     isPollingIPRN = true;
     try {
-        const twentyMinsAgo = new Date(Date.now() - 20 * 60 * 1000); // Rescuing up to 20 minutes back!
+        const twentyMinsAgo = new Date(Date.now() - 20 * 60 * 1000); 
         
         const pendingOrders = await Order.find({ 
             status: "WAIT", 
             trxId: { $ne: "", $exists: true }, 
             createdAt: { $gte: twentyMinsAgo } 
-        }).sort({ _id: -1 }).limit(50).lean();
+        }).sort({ _id: -1 }).limit(40).lean();
 
         if (pendingOrders.length > 0) {
-            console.log(`\n🔍 [RESCUE ENGINE] Fetching OTPs for ${pendingOrders.length} stuck numbers directly from IPRN...`);
+            console.log(`\n🔍 [CLUSTER LEADER] Scanning IPRN for ${pendingOrders.length} pending numbers...`);
             
             const parallelTasks = pendingOrders.map(async (order) => {
                 try {
@@ -307,7 +291,7 @@ const pollIPRNPendingOrders = async () => {
                     const data = await res.json();
                     
                     if (data?.result?.reply === "success" && data.result.message) {
-                        console.log(`⚡ [SNATCHED OTP] TrxID: ${order.trxId} -> ${data.result.message}`);
+                        console.log(`⚡ [SNATCHED] TrxID: ${order.trxId} -> ${data.result.message}`);
                         await processIncomingOTP(order.trxId, data.result.message, "Unknown", order.searchNumber);
                     }
                 } catch(e) {}
@@ -320,7 +304,7 @@ const pollIPRNPendingOrders = async () => {
         isPollingIPRN = false;
     }
 };
-// Runs every 3 seconds!
+// Runs every 3 seconds safely across clusters
 setInterval(pollIPRNPendingOrders, 3000);
 
 // 💥 WEBHOOK (Waiting for Andrew to fix his end) 💥
