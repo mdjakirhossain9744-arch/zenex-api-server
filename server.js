@@ -5,12 +5,11 @@ import { User, Order } from './models.js';
 import fastifyFormbody from '@fastify/formbody'; 
 import fastifyCors from '@fastify/cors'; 
 import Redis from "ioredis"; 
-// 💥 THE BOSS FIX: COMPRESSION ENGINE FOR SLOW NETWORKS & VPN 💥
 import fastifyCompress from '@fastify/compress'; 
 
 dotenv.config();
 
-const fastify = Fastify({ logger: false });
+const fastify = Fastify({ logger: false, trustProxy: true });
 const redis = new Redis(); 
 
 fastify.register(fastifyCors, { 
@@ -39,8 +38,37 @@ const connectDB = async () => {
 
 const getUTCDateString = (dateObj = new Date()) => new Date(dateObj).toISOString().split('T')[0];
 
-const REAL_API_KEY = "MJI4KV0N1CN"; 
-const BASE_API_URL = "https://api.2oo9.cloud/MXS47FLFX0U/tnemn/@public/api";
+// 💥 IPRN ELITE INTEGRATION 💥
+const IPRN_API_URL = "https://api.iprn-elite.com/v1.0";
+const IPRN_API_KEY = process.env.IPRN_API_KEY || "1ddOYcGxRcWUlyi6T7oZzA"; 
+
+const globalSdeMap = new Map();
+
+const fetchSdeList = async () => {
+    try {
+        const payload = { 
+            jsonrpc: "2.0", 
+            method: "sms.realtime:get_subdestination_list", 
+            params: {}, 
+            id: Date.now() 
+        };
+        const res = await fetch(IPRN_API_URL, { 
+            method: "POST", 
+            headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, 
+            body: JSON.stringify(payload) 
+        });
+        const data = await res.json();
+
+        if (data?.result?.subdestination_list) {
+            data.result.subdestination_list.forEach(item => { 
+                globalSdeMap.set(item.sde_key, item.name); 
+            });
+            console.log(`✅ IPRN SDE Dictionary Loaded: ${globalSdeMap.size} destinations cached.`);
+        }
+    } catch (e) {
+        console.error("⚠️ Failed to load SDE list:", e.message);
+    }
+};
 
 const apiAuthCache = new Map();
 const globalWorkerUserCache = new Map(); 
@@ -60,7 +88,6 @@ async function getMaskingKeywords() {
     }
 }
 
-// 💥 BOSS UPGRADE: STRICT OTP EXTRACTOR FOR DASHBOARD DB ONLY 💥
 const extractStrictOTP = (rawText) => {
     if (!rawText) return "00000";
     const match = rawText.match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)/);
@@ -184,6 +211,9 @@ const extractServiceName = (msg) => {
     return "Other"; 
 };
 
+// ==========================================
+// USER API ENDPOINTS (MODIFIED FOR IPRN)
+// ==========================================
 fastify.route({
     method: ['GET', 'POST'], 
     url: '/v1/getnum',
@@ -220,14 +250,21 @@ fastify.route({
 
             let response;
             try {
-                response = await fetch(`${BASE_API_URL}/getnum`, {
+                const payload = { 
+                    jsonrpc: "2.0", 
+                    method: "sms.realtime:allocate", 
+                    params: { 
+                        senderid: "OTP", 
+                        prefix_list: [String(rid).toUpperCase().replace(/X/g, '')], 
+                        dont_check_access: true 
+                    }, 
+                    id: Date.now() 
+                };
+                
+                response = await fetch(IPRN_API_URL, {
                     method: "POST",
-                    headers: { 
-                        "mauthapi": REAL_API_KEY, 
-                        "Content-Type": "application/json",
-                        "Accept": "application/json"
-                    },
-                    body: JSON.stringify({ rid }),
+                    headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" },
+                    body: JSON.stringify(payload),
                     signal: controller.signal
                 });
                 clearTimeout(timeoutId);
@@ -239,16 +276,36 @@ fastify.route({
             let data;
             try { data = await response.json(); } catch(e) { return reply.status(502).send({ meta: { status: "error" }, message: "Invalid upstream response" }); }
 
-            if (data.meta?.code === 200 && data.data) {
+            if (data.result && data.result.number && data.result.number.full) {
+                const trxId = data.result.message_id || "";
+                const fullNumStr = String(data.result.number.full || "");
+                const localNumStr = String(data.result.number.local_number || fullNumStr);
+                
+                let exactCountry = "Unknown";
+                let exactOperator = "Mobile"; 
+                
+                if (data.result.sde_key && globalSdeMap.has(data.result.sde_key)) {
+                    let rawName = globalSdeMap.get(data.result.sde_key);
+                    rawName = rawName.replace(/\s*\([\d+X]+\)\s*$/g, '').trim();
+                    const parts = rawName.split(' - ');
+                    exactCountry = parts[0] ? parts[0].trim() : "Unknown";
+                    
+                    if (parts.length >= 3) { exactOperator = parts[2].trim(); } 
+                    else if (parts.length === 2) { exactOperator = parts[1].trim().toLowerCase() === "mobile" ? "Mobile" : parts[1].trim(); }
+                }
+
                 const todayStr = getUTCDateString();
                 
+                // 💥 BOSS UPGRADE: SAVING TRX_ID FOR EXACT WEBHOOK MATCHING 💥
                 setImmediate(() => {
                     const newOrder = new Order({
                         userEmail: user.email,
-                        searchNumber: data.data.no_plus_number,
-                        displayNumber: data.data.full_number,
-                        country: data.data.country || "Unknown",
-                        operator: data.data.operator || "Any",
+                        searchNumber: fullNumStr,
+                        displayNumber: `+${fullNumStr}`,
+                        requestedRange: rid,
+                        trxId: String(trxId),
+                        country: exactCountry,
+                        operator: exactOperator,
                         status: "WAIT",
                         fullMessage: "Waiting...",
                         otp: "Waiting...", 
@@ -261,221 +318,160 @@ fastify.route({
                 return reply.status(200).send({
                     meta: { status: "success", code: 200 },
                     data: {
-                        copy: data.data.full_number,
-                        number: data.data.full_number,
-                        full_number: data.data.no_plus_number,
-                        country: data.data.country,
+                        copy: `+${fullNumStr}`,
+                        number: `+${fullNumStr}`,
+                        full_number: fullNumStr,
+                        country: exactCountry,
                         iso: "Unknown",
-                        operator: data.data.operator,
+                        operator: exactOperator,
                         status: "pending"
                     }
                 });
             }
 
-            return reply.status(400).send({ meta: { status: "error" }, message: data.message || "Out of stock" });
+            return reply.status(400).send({ meta: { status: "error" }, message: data.error?.message || "Out of stock or Invalid Range" });
         } catch (error) {
             return reply.status(500).send({ meta: { status: "error" }, message: "Server Error" });
         }
     }
 });
 
-let isSyncing = false;
+// ==========================================
+// 💥 SECURE IPRN WEBHOOK LOGIC 💥
+// ==========================================
+const processIncomingOTP = async (trunkTxId, text, senderId, destNum) => {
+    if (!text) return;
+    
+    const cleanDestNum = String(destNum).replace('+', '');
+    
+    // Strict Match Query: Prioritize trxId over number search
+    const query = { $or: [] };
+    if (trunkTxId) query.$or.push({ trxId: String(trunkTxId) });
+    if (cleanDestNum) query.$or.push({ searchNumber: cleanDestNum }, { displayNumber: `+${cleanDestNum}` });
+    
+    if (query.$or.length === 0) return;
 
-const syncMNITBackground = async () => {
-    if (isSyncing) return; 
+    const existingOrders = await Order.find(query).sort({ _id: -1 }).limit(3);
+    
+    if (existingOrders.length > 0) {
+        let baseOrder = existingOrders.find(o => o.status === "WAIT");
+        if (!baseOrder) baseOrder = existingOrders[0]; 
 
-    // 💥 BOSS SPEED UPGRADE: REDUCED REDIS LOCK TO 2 SECONDS FOR FASTER POLLING 💥
-    const lockAcquired = await redis.set("master_otp_sync_lock", "locked", "NX", "EX", 2);
-    if (!lockAcquired) return; 
-
-    isSyncing = true;
-
-    try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15000); 
-
-        let otpResponse;
-        try {
-            otpResponse = await fetch(`${BASE_API_URL}/success-otp?t=${Date.now()}`, {
-                method: "GET", headers: { "mauthapi": REAL_API_KEY, "Accept": "application/json" }, signal: controller.signal
-            });
-            clearTimeout(timeoutId);
-        } catch (e) { clearTimeout(timeoutId); isSyncing = false; return; }
-
-        if (!otpResponse || !otpResponse.ok) { isSyncing = false; return; }
+        const orderAgeInMs = Date.now() - new Date(baseOrder.createdAt).getTime();
+        if (orderAgeInMs > 25 * 60 * 1000 || baseOrder.status === "FAIL" || baseOrder.status === "CANCEL") return; 
         
-        let providerData;
-        try { providerData = await otpResponse.json(); } catch(e) { isSyncing = false; return; }
+        const strictOtp = extractStrictOTP(text);
+        const isDuplicate = existingOrders.some(o => o.fullMessage === text || (o.fullMessage && o.fullMessage.includes(text)) || o.otp === strictOtp);
         
-        let liveOtps = [];
-        if (providerData?.data?.otps && Array.isArray(providerData.data.otps)) liveOtps = providerData.data.otps;
-
-        if (liveOtps.length > 0) {
+        if (!isDuplicate) {
+            
+            let userEarned = 0;
+            let agentEarned = 0;
             
             try {
-                const RawLog = mongoose.models.mnit_raw_logs || mongoose.model("mnit_raw_logs", new mongoose.Schema({
-                    timestamp: { type: Date, default: Date.now },
-                    rawPayload: { type: Object }
-                }, { strict: false }));
-                
-                await RawLog.create({
-                    rawPayload: { source: `FASTIFY_CLUSTER_LEADER_[${process.pid}]`, totalOtpsFetched: liveOtps.length, providerData: liveOtps }
-                });
-            } catch (logErr) {}
-
-            const otpGroups = {};
-            liveOtps.forEach(m => {
-                const mNum = String(m.number || "").replace(/\D/g, "");
-                if (mNum.length >= 6) {
-                    const key = mNum.length > 9 ? mNum.slice(-9) : mNum;
-                    if (!otpGroups[key]) otpGroups[key] = [];
-                    otpGroups[key].push(m);
-                }
-            });
-
-            const twentyMinsAgo = new Date(Date.now() - 20 * 60 * 1000);
-            
-            const rawRecentOrders = await Order.find({ 
-                createdAt: { $gte: twentyMinsAgo }
-            })
-            .sort({ createdAt: -1 }) 
-            .select("_id searchNumber userEmail fullMessage status processedKeys receivedNids createdAt").lean();
-
-            const activeLatestOrders = [];
-            const seenNumbers = new Set();
-
-            for (const order of rawRecentOrders) {
-                if (!order.searchNumber) continue;
-                const cleanSearchNum = String(order.searchNumber).replace(/\D/g, "");
-                if (cleanSearchNum.length < 6) continue;
-
-                if (seenNumbers.has(cleanSearchNum)) continue; 
-                seenNumbers.add(cleanSearchNum);
-
-                if (order.status === "FAIL" || order.status === "CANCEL") continue; 
-                activeLatestOrders.push(order);
-            }
-
-            const consumedOtpsInThisCycle = new Set();
-            const parallelDbTasks = [];
-
-            for (const order of activeLatestOrders) {
-                const cleanSearchNum = String(order.searchNumber).replace(/\D/g, "");
-                const searchKey = cleanSearchNum.length > 9 ? cleanSearchNum.slice(-9) : cleanSearchNum;
-                const matchedOtps = otpGroups[searchKey]; 
-
-                if (matchedOtps && matchedOtps.length > 0) {
-                    for (const matchedOtpObj of matchedOtps) {
+                const actualUser = await User.findOne({ email: baseOrder.userEmail }).lean();
+                if (actualUser) {
+                    const lowerText = text.toLowerCase();
+                    const isFreeService = lowerText.includes("whatsapp") || lowerText.includes("telegram") || lowerText.includes("t.me");
+                    let rawOtpCost = isFreeService ? 0 : (Number(actualUser.otpRate) || 0);
+                    userEarned = Math.abs(rawOtpCost);
+                    
+                    let actualAgent = null;
+                    if (!isFreeService && actualUser.agentEmail && actualUser.agentEmail !== "admin") {
+                        actualAgent = await User.findOne({ 
+                            $or: [ { email: actualUser.agentEmail }, { customAgentMail: actualUser.agentEmail } ], 
+                            role: "agent" 
+                        }).lean();
                         
-                        const uniqueProcessKey = String(matchedOtpObj.otp_id); 
-                        
-                        if (consumedOtpsInThisCycle.has(uniqueProcessKey)) continue; 
-                        
-                        const dbProcessedKeys = order.processedKeys || [];
-                        const dbReceivedNids = order.receivedNids || [];
-                        if (dbProcessedKeys.includes(uniqueProcessKey) || dbReceivedNids.includes(uniqueProcessKey)) {
-                            continue; 
+                        if (actualAgent) {
+                            const aRate = Number(actualAgent.agentMaxRate || 0.70);
+                            const profit = Math.max(0, Number((aRate - userEarned).toFixed(4)));
+                            if (profit > 0) agentEarned = profit;
                         }
+                    }
 
-                        const orderTimeMs = new Date(order.createdAt).getTime(); 
-                        let otpTimeMs = matchedOtpObj.time; 
-                        if (otpTimeMs < 10000000000) otpTimeMs = otpTimeMs * 1000; 
+                    if (userEarned > 0) {
+                        const updatedUser = await User.findOneAndUpdate(
+                            { _id: actualUser._id }, 
+                            { $inc: { balance: userEarned } }, 
+                            { new: true }
+                        );
 
-                        if (otpTimeMs < (orderTimeMs - 86400000)) continue; 
-
-                        const incomingMsgRaw = (matchedOtpObj.message || "").toString().trim();
-                        const lowerMsg = incomingMsgRaw.toLowerCase();
-                        if (!incomingMsgRaw || lowerMsg.includes("waiting") || ["pending", "null", "false", "undefined"].includes(lowerMsg)) continue;
-                        
-                        const digitCount = (incomingMsgRaw.match(/\d/g) || []).length;
-                        if (digitCount < 3) continue; 
-                        
-                        // 💥 DB SAVE: STRICT OTP ONLY 💥
-                        let incomingCode = extractStrictOTP(incomingMsgRaw); 
-
-                        let finalMessageToSave = incomingMsgRaw; 
-
-                        let user = globalWorkerUserCache.get(order.userEmail);
-                        if (!user) {
-                            user = await User.findOne({ email: order.userEmail }).lean();
-                            if (user) globalWorkerUserCache.set(order.userEmail, user);
+                        if (updatedUser && (updatedUser.autoPayEnabled === true || updatedUser.autoPayEnabled === "true") && updatedUser.balance >= 150) {
+                            triggerBinanceAutoPay(updatedUser).catch(() => {});
                         }
-                        if (!user) continue;
-
-                        const isFreeService = lowerMsg.includes("whatsapp") || lowerMsg.includes("telegram") || lowerMsg.includes("t.me");
-                        let rawOtpCost = isFreeService ? 0 : (Number(user.otpRate) || 0);
-                        let otpCost = Math.abs(rawOtpCost); 
-                        
-                        let otpCommission = 0; let agentId = null;
-                        if (!isFreeService && user.agentEmail) {
-                            let agent = globalWorkerUserCache.get(user.agentEmail);
-                            if (!agent) {
-                                agent = await User.findOne({ $or: [{ email: user.agentEmail }, { customAgentMail: user.agentEmail }], role: "agent" }).lean();
-                                if (agent) globalWorkerUserCache.set(user.agentEmail, agent);
-                            }
-                            if (agent) {
-                                agentId = agent._id;
-                                let rawComm = Math.max(0, Number(((Number(agent.agentMaxRate) || 0.70) - otpCost).toFixed(2)));
-                                otpCommission = Math.abs(rawComm);
-                            }
-                        }
-
-                        consumedOtpsInThisCycle.add(uniqueProcessKey);
-
-                        const dbTask = (async () => {
-                            const updatedOrder = await Order.findOneAndUpdate(
-                                { 
-                                    _id: order._id, 
-                                    processedKeys: { $ne: uniqueProcessKey }
-                                },
-                                { 
-                                    $set: { 
-                                        status: "DONE", 
-                                        otp: incomingCode, 
-                                        fullMessage: order.fullMessage && order.fullMessage !== "Waiting..." ? order.fullMessage + " _||_ " + finalMessageToSave : finalMessageToSave,
-                                        expireAt: new Date(Date.now() + 10 * 24 * 60 * 60 * 1000) 
-                                    },
-                                    $inc: { orderCost: otpCost, orderCommission: otpCommission },
-                                    $addToSet: { processedKeys: uniqueProcessKey, receivedNids: uniqueProcessKey } 
-                                },
-                                { returnDocument: 'after', strict: false }
-                            );
-
-                            if (updatedOrder && (otpCost > 0 || otpCommission > 0)) {
-                                if (otpCost > 0) {
-                                    const updatedUser = await User.findOneAndUpdate({ _id: user._id }, { $inc: { balance: otpCost } }, { returnDocument: 'after' });
-                                    if (updatedUser && (updatedUser.autoPayEnabled === true || updatedUser.autoPayEnabled === "true") && updatedUser.balance >= 150) {
-                                        triggerBinanceAutoPay(updatedUser).catch(() => {});
-                                    }
-                                }
-                                if (otpCommission > 0 && agentId) {
-                                    await User.updateOne({ _id: agentId }, { $inc: { agentEarning: otpCommission, balance: otpCommission } });
-                                }
-                            }
-                        })();
-
-                        parallelDbTasks.push(dbTask);
+                    }
+                    if (agentEarned > 0 && actualAgent) {
+                        await User.updateOne({ _id: actualAgent._id }, { $inc: { balance: agentEarned, agentEarning: agentEarned } });
                     }
                 }
+            } catch (balanceErr) {
+                console.error("Balance Update Error:", balanceErr);
             }
 
-            if (parallelDbTasks.length > 0) {
-                await Promise.allSettled(parallelDbTasks);
+            if (baseOrder.status === "WAIT") {
+                baseOrder.status = "DONE"; 
+                baseOrder.otp = strictOtp; 
+                baseOrder.fullMessage = text; 
+                baseOrder.trueService = senderId || extractServiceName(text);
+                baseOrder.orderCost = userEarned; 
+                baseOrder.orderCommission = agentEarned; 
+                await baseOrder.save();
+            } else {
+                const newMultiOrder = new Order({
+                    userEmail: baseOrder.userEmail, 
+                    userName: baseOrder.userName, 
+                    userUid: baseOrder.userUid, 
+                    agentEmail: baseOrder.agentEmail,
+                    searchNumber: baseOrder.searchNumber, 
+                    displayNumber: baseOrder.displayNumber, 
+                    country: baseOrder.country, 
+                    operator: baseOrder.operator,
+                    dateString: baseOrder.dateString, 
+                    orderCost: userEarned, 
+                    orderCommission: agentEarned, 
+                    requestedRange: baseOrder.requestedRange,
+                    trxId: baseOrder.trxId, 
+                    status: "DONE", 
+                    otp: strictOtp, 
+                    fullMessage: text, 
+                    trueService: senderId || extractServiceName(text), 
+                    expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
+                });
+                await newMultiOrder.save();
             }
         }
-    } catch (error) {
-        console.error("Background Sync Error:", error.message);
-    } finally {
-        isSyncing = false; 
     }
 };
 
-// 💥 BOSS SPEED UPGRADE: CRON RUNS EVERY 2.5 SECONDS FOR ULTRA-LOW LATENCY 💥
-setInterval(syncMNITBackground, 2500); 
+fastify.post('/v1/webhook/iprn-receive', async (request, reply) => {
+    try {
+        const allowedIPs = ['51.38.107.49', '127.0.0.1']; 
+        const clientIP = request.ip;
+        
+        if (!allowedIPs.includes(clientIP)) {
+            console.warn(`🚨 WEBHOOK REJECTED! Unknown IP: ${clientIP}`);
+            return reply.status(403).send({ success: false, message: "Unauthorized IP. ZENEX Security Firewall Active." });
+        }
+        
+        const data = request.body || {};
+        const trunkTxId = data.message_id || data.trunk_number_transaction_id || data.trxId;
+        const text = data.text || data.message || data.content;
+        const senderId = data.senderid || data.source_addr || "Unknown";
+        const destNum = data.destination_addr || data.number || data.b_number;
+        
+        if (!text) return reply.status(400).send({ success: false, message: "No text found in payload" });
+        
+        // 💥 Fire & Forget for ultra-fast response to Provider 💥
+        processIncomingOTP(trunkTxId, text, senderId, destNum).catch(console.error);
+        
+        return reply.status(200).send({ success: true, message: "Webhook received successfully" });
+    } catch (error) { 
+        return reply.status(500).send({ success: false, message: "Internal Server Error" }); 
+    }
+});
 
-// ==========================================
-// USER API ENDPOINTS
-// ==========================================
+
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
     try {
         const apiKey = request.headers['mapikey'];
@@ -516,7 +512,6 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
             const numberClean = String(order.displayNumber || order.searchNumber || "").replace(/\D/g, "");
             const baseNid = "ZX_" + order._id.toString().substring(0, 10).toUpperCase();
 
-            // 💥 BOSS UPGRADE: UNIFORM NID INDEXING FOR ALL OTPS (ZERO MEMORY LEAK) 💥
             let rawMsg = order.fullMessage || order.otp || "";
             if (rawMsg.includes("_||_")) {
                 const msgsArray = rawMsg.split("_||_").map(m => m.trim()).filter(Boolean);
@@ -531,7 +526,6 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
                     });
                 });
             } else {
-                // For single OTP, we also strictly append _0 to maintain standard format for bots
                 expandedOtps.push({ 
                     nid: `${baseNid}_0`, 
                     number: numberClean, 
@@ -545,7 +539,6 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
 
         const validOtps = expandedOtps.filter(o => o.otp && o.otp.trim() !== "" && !["waiting...", "pending", "null"].includes(o.otp.toLowerCase()));
         
-        // 💥 BOSS SPEED UPGRADE: CACHE REDUCED TO 1.5 SECONDS FOR REAL-TIME DELIVERY 💥
         userOtpResponseCache.set(cleanKey, { otps: validOtps, expiry: Date.now() + 1500 });
         
         return reply.status(200).send({ meta: { status: "success", code: 200 }, data: { otps: validOtps } });
@@ -626,7 +619,6 @@ fastify.get('/v1/user/today-otps', async (request, reply) => {
         const orders = await Order.find({ userEmail: user.email, dateString: todayStr, status: "DONE" }).select("displayNumber otp fullMessage -_id").lean();
         if (orders.length === 0) return reply.type('text/plain').send("NO_DATA");
         
-        // 💥 BOSS UPGRADE: REVERTED TO FULL MASKED MESSAGE FOR TEXT EXPORT 💥
         const textData = orders.map((o) => {
             return `${String(o.displayNumber).replace(/\D/g, "")}|${applyMasking(o.fullMessage || o.otp || "", hiddenKeywords)}`;
         }).join('\n');
@@ -638,8 +630,9 @@ fastify.get('/v1/user/today-otps', async (request, reply) => {
 const startServer = async () => {
     try {
         await connectDB();
+        await fetchSdeList(); // 💥 Loads IPRN Country Data on Startup 💥
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V7 (Leader Protocol Active) is LIVE at: http://localhost:${process.env.PORT || 4000}`);
+        console.log(`⚡ ZENEX Microservice V7 (IPRN Webhook Protocol Active) is LIVE at: http://localhost:${process.env.PORT || 4000}`);
     } catch (err) { process.exit(1); }
 };
 startServer();
