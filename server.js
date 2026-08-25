@@ -55,9 +55,10 @@ async function getMaskingKeywords() {
     } catch (e) { return cachedMaskingSettings.keywords; }
 }
 
+// 💥 BUG FIX: Ultra-Robust OTP Extractor (Ignores language & special chars) 💥
 const extractStrictOTP = (rawText) => {
     if (!rawText) return "00000";
-    const match = rawText.match(/(?:\b\d{4,8}\b)|(?:\b\d{3}[\s-]\d{3,4}\b)/);
+    const match = rawText.match(/\d{3}[\s-]\d{3,4}|\d{4,8}/);
     return match ? match[0].trim() : "00000";
 };
 
@@ -104,7 +105,7 @@ async function triggerBinanceAutoPay(user) {
 const extractServiceName = (msg) => {
     if (!msg) return "Other";
     const text = msg.toLowerCase();
-    if (text.includes('facebook') || text.includes(' fb ') || text.includes('facebk') || text.includes('fb.me')) return 'Facebook';
+    if (text.includes('facebook') || text.includes(' fb ') || text.includes('facebk') || text.includes('fb.me') || text.includes('ফেসবুক') || text.includes('ফেচবুক')) return 'Facebook';
     if (text.includes('whatsapp') || text.includes(' wa ') || text.includes('vwaq') || text.includes('wa.me')) return 'WhatsApp';
     if (text.includes('telegram') || text.includes('t.me')) return 'Telegram';
     if (text.includes('instagram') || text.includes(' ig ') || text.includes('ig.me')) return 'Instagram';
@@ -115,11 +116,6 @@ const extractServiceName = (msg) => {
     if (text.includes('tiktok') || text.includes(' tt ')) return 'TikTok';
     if (text.includes('snapchat')) return 'Snapchat';
     if (text.includes('twitter') || text.includes(' x ')) return 'X';
-    if (text.includes('apple') || text.includes('icloud')) return 'Apple';
-    if (text.includes('microsoft') || text.includes('live') || text.includes('outlook')) return 'Microsoft';
-    if (text.includes('amazon')) return 'Amazon';
-    if (text.includes('netflix')) return 'Netflix';
-    if (text.includes('uber')) return 'Uber';
     return "Other"; 
 };
 
@@ -166,7 +162,6 @@ fastify.route({
             if (data.result && data.result.number && data.result.number.full) {
                 const trxId = data.result.message_id || "";
                 const fullNumStr = String(data.result.number.full || "");
-                const localNumStr = String(data.result.number.local_number || fullNumStr);
                 
                 let exactCountry = "Unknown"; let exactOperator = "Mobile"; 
                 if (data.result.sde_key && globalSdeMap.has(data.result.sde_key)) {
@@ -198,83 +193,100 @@ fastify.route({
     }
 });
 
+// 💥 THE OTP PROCESSOR & AUDIT SYSTEM 💥
 const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum) => {
     if (!rawText) return;
     
-    // 💥 RESTORED: No regex tags manipulation. Keeps the exact original format from provider! 💥
-    const text = rawText.trim();
-    
+    // We clean <#> and newlines to keep it readable, but leave everything else intact
+    let text = rawText.replace(/[<#>]/g, '').replace(/\n/g, ' ').replace(/\r/g, '').replace(/\s{2,}/g, ' ').trim();
     const cleanDestNum = String(destNum).replace('+', '');
+    
     const query = { $or: [] };
     if (trunkTxId) query.$or.push({ trxId: String(trunkTxId) });
     if (cleanDestNum) query.$or.push({ searchNumber: cleanDestNum }, { displayNumber: `+${cleanDestNum}` });
-    if (query.$or.length === 0) return;
+    
+    if (query.$or.length === 0) {
+        console.log(`🛑 [AUDIT FAIL] Missing TrxId & Number for MSG: ${text}`);
+        return;
+    }
 
-    const existingOrders = await Order.find(query).sort({ _id: -1 }).limit(3);
-    if (existingOrders.length > 0) {
-        let baseOrder = existingOrders.find(o => o.status === "WAIT");
-        if (!baseOrder) baseOrder = existingOrders[0]; 
+    const existingOrders = await Order.find(query).sort({ _id: -1 }).limit(5); // Increased to 5
+    
+    if (existingOrders.length === 0) {
+        console.log(`🛑 [AUDIT FAIL] Order Not Found in DB for ${cleanDestNum} | MSG: ${text}`);
+        return;
+    }
 
-        const orderAgeInMs = Date.now() - new Date(baseOrder.createdAt).getTime();
-        if (orderAgeInMs > 25 * 60 * 1000 || baseOrder.status === "FAIL" || baseOrder.status === "CANCEL") return; 
-        
-        const strictOtp = extractStrictOTP(text);
-        const isDuplicate = existingOrders.some(o => 
-            o.fullMessage === text || 
-            (o.fullMessage && o.fullMessage.includes(text)) || 
-            (strictOtp !== "00000" && o.otp === strictOtp)
-        );
-        
-        if (!isDuplicate) {
-            let userEarned = 0; let agentEarned = 0;
-            try {
-                const actualUser = await User.findOne({ email: baseOrder.userEmail }).lean();
-                if (actualUser) {
-                    const lowerText = text.toLowerCase();
-                    const isFreeService = lowerText.includes("whatsapp") || lowerText.includes("telegram") || lowerText.includes("t.me");
-                    let rawOtpCost = isFreeService ? 0 : (Number(actualUser.otpRate) || 0);
-                    userEarned = Math.abs(rawOtpCost);
-                    
-                    let actualAgent = null;
-                    if (!isFreeService && actualUser.agentEmail && actualUser.agentEmail !== "admin") {
-                        actualAgent = await User.findOne({ $or: [ { email: actualUser.agentEmail }, { customAgentMail: actualUser.agentEmail } ], role: "agent" }).lean();
-                        if (actualAgent) {
-                            const aRate = Number(actualAgent.agentMaxRate || 0.70);
-                            const profit = Math.max(0, Number((aRate - userEarned).toFixed(4)));
-                            if (profit > 0) agentEarned = profit;
-                        }
-                    }
+    let baseOrder = existingOrders.find(o => o.status === "WAIT");
+    if (!baseOrder) baseOrder = existingOrders[0]; 
 
-                    if (userEarned > 0) {
-                        const updatedUser = await User.findOneAndUpdate({ _id: actualUser._id }, { $inc: { balance: userEarned } }, { returnDocument: 'after' });
-                        if (updatedUser && (updatedUser.autoPayEnabled === true || updatedUser.autoPayEnabled === "true") && updatedUser.balance >= 150) { triggerBinanceAutoPay(updatedUser).catch(() => {}); }
-                    }
-                    if (agentEarned > 0 && actualAgent) { await User.updateOne({ _id: actualAgent._id }, { $inc: { balance: agentEarned, agentEarning: agentEarned } }); }
+    const orderAgeInMs = Date.now() - new Date(baseOrder.createdAt).getTime();
+    if (orderAgeInMs > 25 * 60 * 1000 || baseOrder.status === "FAIL" || baseOrder.status === "CANCEL") {
+        console.log(`🛑 [AUDIT FAIL] Order too old or canceled for ${cleanDestNum}`);
+        return; 
+    }
+    
+    const strictOtp = extractStrictOTP(text);
+    const isDuplicate = existingOrders.some(o => 
+        o.fullMessage === text || 
+        (o.fullMessage && o.fullMessage.includes(text)) || 
+        (strictOtp !== "00000" && o.otp === strictOtp)
+    );
+    
+    if (isDuplicate) {
+        console.log(`🛑 [AUDIT FAIL] Duplicate OTP detected for ${cleanDestNum} | OTP: ${strictOtp}`);
+        return;
+    }
+
+    // --- OTP is Valid, let's process it ---
+    let userEarned = 0; let agentEarned = 0;
+    try {
+        const actualUser = await User.findOne({ email: baseOrder.userEmail }).lean();
+        if (actualUser) {
+            const lowerText = text.toLowerCase();
+            const isFreeService = lowerText.includes("whatsapp") || lowerText.includes("telegram") || lowerText.includes("t.me");
+            let rawOtpCost = isFreeService ? 0 : (Number(actualUser.otpRate) || 0);
+            userEarned = Math.abs(rawOtpCost);
+            
+            let actualAgent = null;
+            if (!isFreeService && actualUser.agentEmail && actualUser.agentEmail !== "admin") {
+                actualAgent = await User.findOne({ $or: [ { email: actualUser.agentEmail }, { customAgentMail: actualUser.agentEmail } ], role: "agent" }).lean();
+                if (actualAgent) {
+                    const aRate = Number(actualAgent.agentMaxRate || 0.70);
+                    const profit = Math.max(0, Number((aRate - userEarned).toFixed(4)));
+                    if (profit > 0) agentEarned = profit;
                 }
-            } catch (balanceErr) {}
-
-            let detectedService = extractServiceName(text);
-            let finalTrueService = detectedService !== "Other" ? detectedService : (senderId && senderId !== "Unknown" ? senderId : "Other");
-
-            if (baseOrder.status === "WAIT") {
-                baseOrder.status = "DONE"; baseOrder.otp = strictOtp; baseOrder.fullMessage = text; 
-                baseOrder.trueService = finalTrueService; baseOrder.orderCost = userEarned; baseOrder.orderCommission = agentEarned; 
-                await baseOrder.save();
-                console.log(`✅ [DELIVERED] OTP for ${destNum} | App: ${finalTrueService}`);
-            } else {
-                const newMultiOrder = new Order({
-                    userEmail: baseOrder.userEmail, userName: baseOrder.userName, userUid: baseOrder.userUid, agentEmail: baseOrder.agentEmail,
-                    searchNumber: baseOrder.searchNumber, displayNumber: baseOrder.displayNumber, country: baseOrder.country, operator: baseOrder.operator,
-                    dateString: baseOrder.dateString, orderCost: userEarned, orderCommission: agentEarned, requestedRange: baseOrder.requestedRange,
-                    trxId: baseOrder.trxId, status: "DONE", otp: strictOtp, fullMessage: text, trueService: finalTrueService, expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
-                });
-                await newMultiOrder.save();
             }
+
+            if (userEarned > 0) {
+                const updatedUser = await User.findOneAndUpdate({ _id: actualUser._id }, { $inc: { balance: userEarned } }, { returnDocument: 'after' });
+                if (updatedUser && (updatedUser.autoPayEnabled === true || updatedUser.autoPayEnabled === "true") && updatedUser.balance >= 150) { triggerBinanceAutoPay(updatedUser).catch(() => {}); }
+            }
+            if (agentEarned > 0 && actualAgent) { await User.updateOne({ _id: actualAgent._id }, { $inc: { balance: agentEarned, agentEarning: agentEarned } }); }
         }
+    } catch (balanceErr) {}
+
+    let detectedService = extractServiceName(text);
+    let finalTrueService = detectedService !== "Other" ? detectedService : (senderId && senderId !== "Unknown" ? senderId : "Other");
+
+    if (baseOrder.status === "WAIT") {
+        baseOrder.status = "DONE"; baseOrder.otp = strictOtp; baseOrder.fullMessage = text; 
+        baseOrder.trueService = finalTrueService; baseOrder.orderCost = userEarned; baseOrder.orderCommission = agentEarned; 
+        await baseOrder.save();
+        console.log(`✅ [DELIVERED] ${cleanDestNum} | App: ${finalTrueService} | OTP: ${strictOtp}`);
+    } else {
+        const newMultiOrder = new Order({
+            userEmail: baseOrder.userEmail, userName: baseOrder.userName, userUid: baseOrder.userUid, agentEmail: baseOrder.agentEmail,
+            searchNumber: baseOrder.searchNumber, displayNumber: baseOrder.displayNumber, country: baseOrder.country, operator: baseOrder.operator,
+            dateString: baseOrder.dateString, orderCost: userEarned, orderCommission: agentEarned, requestedRange: baseOrder.requestedRange,
+            trxId: baseOrder.trxId, status: "DONE", otp: strictOtp, fullMessage: text, trueService: finalTrueService, expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
+        });
+        await newMultiOrder.save();
+        console.log(`✅ [MULTI-DELIVERED] ${cleanDestNum} | App: ${finalTrueService} | OTP: ${strictOtp}`);
     }
 };
 
-// 💥 THE GLOBAL MDR ENGINE (Pulls Facebook & All OTPs regardless of Trunk ID!) 💥
+// 💥 THE UNSTOPPABLE ENGINE (300 Orders Capacity) 💥
 let isPollingIPRN = false;
 const pollIPRNPendingOrders = async () => {
     if (isPollingIPRN) return;
@@ -284,19 +296,11 @@ const pollIPRNPendingOrders = async () => {
 
     isPollingIPRN = true;
     try {
-        // 💥 METHOD 1: TRUNK-FREE GLOBAL FETCH (100% Reliable for ALL Apps including Facebook)
+        // METHOD 1: GLOBAL FETCH (Limit 500 to catch everything from the provider)
         const payload = { 
-            jsonrpc: "2.0", 
-            method: "sms.mdr_full:get_list", 
-            params: { limit: 100 }, // No Target filter, grabs everything from the entire account!
-            id: Date.now() 
+            jsonrpc: "2.0", method: "sms.mdr_full:get_list", params: { limit: 500 }, id: Date.now() 
         };
-        
-        const res = await fetch(IPRN_API_URL, { 
-            method: "POST", 
-            headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, 
-            body: JSON.stringify(payload) 
-        });
+        const res = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
         const data = await res.json();
         const messages = data?.result?.mdr_full_list || data?.result?.mdr_list || [];
         
@@ -311,12 +315,12 @@ const pollIPRNPendingOrders = async () => {
             }
         }
 
-        // 💥 METHOD 2: INDIVIDUAL TRXID FALLBACK (Only for fresh orders missing in the list)
+        // 💥 METHOD 2: MASSIVE TARGETED FETCH (Capacity increased from 30 to 300!) 💥
         const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000); 
-        const pendingOrders = await Order.find({ status: "WAIT", trxId: { $ne: "", $exists: true }, createdAt: { $gte: fifteenMinsAgo } }).sort({ _id: -1 }).limit(30).lean();
+        const pendingOrders = await Order.find({ status: "WAIT", trxId: { $ne: "", $exists: true }, createdAt: { $gte: fifteenMinsAgo } }).sort({ _id: -1 }).limit(300).lean();
 
         if (pendingOrders.length > 0) {
-            const chunkSize = 5; 
+            const chunkSize = 10; 
             for (let i = 0; i < pendingOrders.length; i += chunkSize) {
                 const chunk = pendingOrders.slice(i, i + chunkSize);
                 await Promise.allSettled(chunk.map(async (order) => {
@@ -330,16 +334,16 @@ const pollIPRNPendingOrders = async () => {
                         }
                     } catch(e) {}
                 }));
-                await new Promise(r => setTimeout(r, 200));
+                await new Promise(r => setTimeout(r, 150));
             }
         }
     } catch (error) {
-        console.error("Global MDR Engine Error:", error.message);
+        console.error("Unstoppable Engine Error:", error.message);
     } finally {
         isPollingIPRN = false;
     }
 };
-// Runs safely across clusters
+// Runs every 4 seconds safely
 setInterval(pollIPRNPendingOrders, 4000);
 
 fastify.route({
@@ -411,7 +415,7 @@ const startServer = async () => {
         await connectDB();
         await fetchSdeList(); 
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V7 (Global MDR Engine Active) is LIVE!`);
+        console.log(`⚡ ZENEX Microservice V7 (The Unstoppable Engine + Audit Radar) is LIVE!`);
     } catch (err) { process.exit(1); }
 };
 startServer();
