@@ -29,7 +29,7 @@ const connectDB = async () => {
     try {
         const opts = { maxPoolSize: 150, minPoolSize: 10 };
         await mongoose.connect(process.env.MONGODB_URI, opts);
-        console.log(`✅ ZENEX Database Connected to API Microservice [Instance: ${process.pid}]! 🚀`);
+        console.log(`✅ ZENEX Database Connected to API Microservice! 🚀`);
     } catch (error) {
         console.error('❌ Database Connection Failed:', error);
         process.exit(1);
@@ -269,7 +269,7 @@ const processIncomingOTP = async (trunkTxId, text, senderId, destNum) => {
                 baseOrder.status = "DONE"; baseOrder.otp = strictOtp; baseOrder.fullMessage = text; 
                 baseOrder.trueService = senderId || extractServiceName(text); baseOrder.orderCost = userEarned; baseOrder.orderCommission = agentEarned; 
                 await baseOrder.save();
-                console.log(`✅ [OTP MATCHED] Delivered to Dashboard: ${text}`);
+                console.log(`✅ [RESCUED] OTP Delivered to User: ${destNum}`);
             } else {
                 const newMultiOrder = new Order({
                     userEmail: baseOrder.userEmail, userName: baseOrder.userName, userUid: baseOrder.userUid, agentEmail: baseOrder.agentEmail,
@@ -283,31 +283,31 @@ const processIncomingOTP = async (trunkTxId, text, senderId, destNum) => {
     }
 };
 
-// 💥 BOSS UPGRADE: AUTO-POLLING FALLBACK ENGINE 💥
-// This will force-pull the OTP from IPRN even if the webhook fails to reach us!
+// 💥 EXTREME RESCUE POLLING ENGINE (Bypasses Webhook Completely) 💥
 let isPollingIPRN = false;
 const pollIPRNPendingOrders = async () => {
     if (isPollingIPRN) return;
     isPollingIPRN = true;
     try {
-        const tenMinsAgo = new Date(Date.now() - 10 * 60 * 1000);
-        // Find orders waiting for OTP that have a valid message_id (trxId)
+        const twentyMinsAgo = new Date(Date.now() - 20 * 60 * 1000); // Rescuing up to 20 minutes back!
+        
         const pendingOrders = await Order.find({ 
             status: "WAIT", 
-            trxId: { $ne: "" }, 
-            createdAt: { $gte: tenMinsAgo } 
-        }).sort({ _id: -1 }).limit(10).lean();
+            trxId: { $ne: "", $exists: true }, 
+            createdAt: { $gte: twentyMinsAgo } 
+        }).sort({ _id: -1 }).limit(50).lean();
 
         if (pendingOrders.length > 0) {
+            console.log(`\n🔍 [RESCUE ENGINE] Fetching OTPs for ${pendingOrders.length} stuck numbers directly from IPRN...`);
+            
             const parallelTasks = pendingOrders.map(async (order) => {
                 try {
                     const payload = { jsonrpc: "2.0", method: "sms.realtime:get_message", params: { message_id: order.trxId }, id: Date.now() };
                     const res = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
                     const data = await res.json();
                     
-                    // If IPRN replies 'success', it means OTP has arrived!
                     if (data?.result?.reply === "success" && data.result.message) {
-                        console.log(`⚡ [POLL ENGINE] Fetched OTP from IPRN for ${order.displayNumber}: ${data.result.message}`);
+                        console.log(`⚡ [SNATCHED OTP] TrxID: ${order.trxId} -> ${data.result.message}`);
                         await processIncomingOTP(order.trxId, data.result.message, "Unknown", order.searchNumber);
                     }
                 } catch(e) {}
@@ -315,32 +315,27 @@ const pollIPRNPendingOrders = async () => {
             await Promise.allSettled(parallelTasks);
         }
     } catch (error) {
-        console.error("Polling Error:", error.message);
+        console.error("Rescue Engine Error:", error.message);
     } finally {
         isPollingIPRN = false;
     }
 };
-// Run the poll engine every 4 seconds
-setInterval(pollIPRNPendingOrders, 4000);
+// Runs every 3 seconds!
+setInterval(pollIPRNPendingOrders, 3000);
 
-// 💥 WEBHOOK (Fixed to accept GET & POST just in case) 💥
+// 💥 WEBHOOK (Waiting for Andrew to fix his end) 💥
 fastify.route({
     method: ['GET', 'POST'],
     url: '/v1/webhook/iprn-receive',
     handler: async (request, reply) => {
         try {
-            const clientIP = request.ip;
             const data = request.method === 'GET' ? request.query : (request.body || {});
-            
-            console.log(`\n🔥 [WEBHOOK HIT] IP: ${clientIP} | Payload:`, JSON.stringify(data));
-            
             const trunkTxId = data.message_id || data.trunk_number_transaction_id || data.trxId;
             const text = data.text || data.message || data.content;
             const senderId = data.senderid || data.source_addr || "Unknown";
             const destNum = data.destination_addr || data.number || data.b_number;
             
             if (!text) return reply.status(400).send({ success: false, message: "No text found in payload" });
-            
             processIncomingOTP(trunkTxId, text, senderId, destNum).catch(console.error);
             return reply.status(200).send({ success: true, message: "Webhook processed" });
         } catch (error) { return reply.status(500).send({ success: false, message: "Internal Error" }); }
@@ -398,7 +393,7 @@ const startServer = async () => {
         await connectDB();
         await fetchSdeList(); 
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V7 (IPRN Auto-Poll + Webhook Active) is LIVE at: http://localhost:${process.env.PORT || 4000}`);
+        console.log(`⚡ ZENEX Microservice V7 (Extreme Rescue Active) is LIVE at: http://localhost:${process.env.PORT || 4000}`);
     } catch (err) { process.exit(1); }
 };
 startServer();
