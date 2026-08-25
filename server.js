@@ -28,21 +28,6 @@ const getUTCDateString = (dateObj = new Date()) => new Date(dateObj).toISOString
 const IPRN_API_URL = "https://api.iprn-elite.com/v1.0";
 const IPRN_API_KEY = process.env.IPRN_API_KEY || "1ddOYcGxRcWUlyi6T7oZzA"; 
 
-// 💥 V2 Trunk ID Logic Restored 💥
-let IPRN_SMS_TRUNK_ID = null;
-const fetchIPRNTrunk = async () => {
-    try {
-        const payload = { jsonrpc: "2.0", method: "sms.trunk:get_list", params: {}, id: Date.now() };
-        const res = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-        const data = await res.json();
-        if (data && data.result && data.result.trunk_list && data.result.trunk_list.length > 0) {
-            const otpTrunk = data.result.trunk_list.find(t => t.name && t.name.toLowerCase() === "global access");
-            IPRN_SMS_TRUNK_ID = otpTrunk ? otpTrunk.id : data.result.trunk_list[0].id;
-            console.log(`🔥 IPRN Trunk ID Loaded Successfully: [${IPRN_SMS_TRUNK_ID}]`);
-        }
-    } catch (err) {}
-};
-
 const globalSdeMap = new Map();
 const fetchSdeList = async () => {
     try {
@@ -216,11 +201,9 @@ fastify.route({
 const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum) => {
     if (!rawText) return;
     
-    // 💥 MULTIPLE <#> AND NEWLINE CLEANUP 💥
-    let text = rawText.replace(/<#>/g, '').replace(/\n/g, ' ').replace(/\r/g, '').trim();
-    // Clean up multiple spaces
-    text = text.replace(/\s{2,}/g, ' ');
-
+    // 💥 RESTORED: No regex tags manipulation. Keeps the exact original format from provider! 💥
+    const text = rawText.trim();
+    
     const cleanDestNum = String(destNum).replace('+', '');
     const query = { $or: [] };
     if (trunkTxId) query.$or.push({ trxId: String(trunkTxId) });
@@ -236,7 +219,11 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum) => {
         if (orderAgeInMs > 25 * 60 * 1000 || baseOrder.status === "FAIL" || baseOrder.status === "CANCEL") return; 
         
         const strictOtp = extractStrictOTP(text);
-        const isDuplicate = existingOrders.some(o => o.fullMessage === text || (o.fullMessage && o.fullMessage.includes(text)) || o.otp === strictOtp);
+        const isDuplicate = existingOrders.some(o => 
+            o.fullMessage === text || 
+            (o.fullMessage && o.fullMessage.includes(text)) || 
+            (strictOtp !== "00000" && o.otp === strictOtp)
+        );
         
         if (!isDuplicate) {
             let userEarned = 0; let agentEarned = 0;
@@ -273,7 +260,7 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum) => {
                 baseOrder.status = "DONE"; baseOrder.otp = strictOtp; baseOrder.fullMessage = text; 
                 baseOrder.trueService = finalTrueService; baseOrder.orderCost = userEarned; baseOrder.orderCommission = agentEarned; 
                 await baseOrder.save();
-                console.log(`✅ [DELIVERED] OTP for ${destNum}`);
+                console.log(`✅ [DELIVERED] OTP for ${destNum} | App: ${finalTrueService}`);
             } else {
                 const newMultiOrder = new Order({
                     userEmail: baseOrder.userEmail, userName: baseOrder.userName, userUid: baseOrder.userUid, agentEmail: baseOrder.agentEmail,
@@ -287,7 +274,7 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum) => {
     }
 };
 
-// 💥 THE ULTIMATE HYBRID ENGINE (1-Call Pull + Anti-Rate-Limit Rescue) 💥
+// 💥 THE GLOBAL MDR ENGINE (Pulls Facebook & All OTPs regardless of Trunk ID!) 💥
 let isPollingIPRN = false;
 const pollIPRNPendingOrders = async () => {
     if (isPollingIPRN) return;
@@ -297,52 +284,57 @@ const pollIPRNPendingOrders = async () => {
 
     isPollingIPRN = true;
     try {
-        // METHOD 1: Fetch via Trunk ID (Super Fast, 1 Call = 60 OTPs)
-        if (IPRN_SMS_TRUNK_ID) {
-            const payload = { jsonrpc: "2.0", method: "sms.mdr_full:get_list", params: { target: { "sms.trunk_id": IPRN_SMS_TRUNK_ID }, limit: 60 }, id: Date.now() };
-            const res = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-            const data = await res.json();
-            const messages = data?.result?.mdr_full_list || data?.result?.mdr_list || [];
-            
-            if (messages.length > 0) {
-                for (const msg of messages) {
-                    const trunkTxId = msg.message_id || msg.trunk_number_transaction_id || "";
-                    const text = msg.message || msg.text || msg.content || "";
-                    const senderId = msg.senderid || msg.source_addr || "Unknown";
-                    const destNum = msg.phone || msg.destination_addr || msg.number || "";
-                    
-                    if (text && destNum) await processIncomingOTP(trunkTxId, text, senderId, destNum);
-                }
+        // 💥 METHOD 1: TRUNK-FREE GLOBAL FETCH (100% Reliable for ALL Apps including Facebook)
+        const payload = { 
+            jsonrpc: "2.0", 
+            method: "sms.mdr_full:get_list", 
+            params: { limit: 100 }, // No Target filter, grabs everything from the entire account!
+            id: Date.now() 
+        };
+        
+        const res = await fetch(IPRN_API_URL, { 
+            method: "POST", 
+            headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, 
+            body: JSON.stringify(payload) 
+        });
+        const data = await res.json();
+        const messages = data?.result?.mdr_full_list || data?.result?.mdr_list || [];
+        
+        if (messages.length > 0) {
+            for (const msg of messages) {
+                const trunkTxId = msg.message_id || msg.trunk_number_transaction_id || "";
+                const text = msg.message || msg.text || msg.content || "";
+                const senderId = msg.senderid || msg.source_addr || "Unknown";
+                const destNum = msg.phone || msg.destination_addr || msg.number || "";
+                
+                if (text && destNum) await processIncomingOTP(trunkTxId, text, senderId, destNum);
             }
         }
 
-        // METHOD 2: Targeted Fetch (To catch any buried OTPs without hitting Rate Limit)
+        // 💥 METHOD 2: INDIVIDUAL TRXID FALLBACK (Only for fresh orders missing in the list)
         const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000); 
         const pendingOrders = await Order.find({ status: "WAIT", trxId: { $ne: "", $exists: true }, createdAt: { $gte: fifteenMinsAgo } }).sort({ _id: -1 }).limit(30).lean();
 
         if (pendingOrders.length > 0) {
-            // Processing in Chunks of 5 to protect API from blocking us
-            const chunkSize = 5;
+            const chunkSize = 5; 
             for (let i = 0; i < pendingOrders.length; i += chunkSize) {
                 const chunk = pendingOrders.slice(i, i + chunkSize);
                 await Promise.allSettled(chunk.map(async (order) => {
                     try {
-                        const payload = { jsonrpc: "2.0", method: "sms.realtime:get_message", params: { message_id: order.trxId }, id: Date.now() };
-                        const res = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-                        const data = await res.json();
+                        const fallPayload = { jsonrpc: "2.0", method: "sms.realtime:get_message", params: { message_id: order.trxId }, id: Date.now() };
+                        const fallRes = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(fallPayload) });
+                        const fallData = await fallRes.json();
                         
-                        if (data?.result?.reply === "success" && data.result.message) {
-                            console.log(`⚡ [HYBRID SNATCHED] TrxID: ${order.trxId} -> ${data.result.message}`);
-                            await processIncomingOTP(order.trxId, data.result.message, "Unknown", order.searchNumber);
+                        if (fallData?.result?.reply === "success" && fallData.result.message) {
+                            await processIncomingOTP(order.trxId, fallData.result.message, "Unknown", order.searchNumber);
                         }
                     } catch(e) {}
                 }));
-                // Wait 200ms between chunks to keep IPRN server happy
                 await new Promise(r => setTimeout(r, 200));
             }
         }
     } catch (error) {
-        console.error("Hybrid Engine Error:", error.message);
+        console.error("Global MDR Engine Error:", error.message);
     } finally {
         isPollingIPRN = false;
     }
@@ -418,9 +410,8 @@ const startServer = async () => {
     try {
         await connectDB();
         await fetchSdeList(); 
-        await fetchIPRNTrunk(); // 💥 Fetches the critical Trunk ID on boot! 💥
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V7 (Ultimate Hybrid Rescue Active) is LIVE!`);
+        console.log(`⚡ ZENEX Microservice V7 (Global MDR Engine Active) is LIVE!`);
     } catch (err) { process.exit(1); }
 };
 startServer();
