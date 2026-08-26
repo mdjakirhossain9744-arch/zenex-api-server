@@ -55,7 +55,6 @@ async function getMaskingKeywords() {
     } catch (e) { return cachedMaskingSettings.keywords; }
 }
 
-// 💥 BUG FIX: Ultra-Robust OTP Extractor (Ignores language & special chars) 💥
 const extractStrictOTP = (rawText) => {
     if (!rawText) return "00000";
     const match = rawText.match(/\d{3}[\s-]\d{3,4}|\d{4,8}/);
@@ -193,11 +192,15 @@ fastify.route({
     }
 });
 
-// 💥 THE OTP PROCESSOR & AUDIT SYSTEM 💥
-const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum) => {
+// 💥 THE OTP PROCESSOR (With Silent Multi-OTP Guard) 💥
+const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId) => {
     if (!rawText) return;
+
+    if (smsId && smsId !== "no_id") {
+        const lockAcquired = await redis.set(`iprn_sms_${smsId}`, "locked", "NX", "EX", 86400); 
+        if (!lockAcquired) return; // Silent Duplicate Rejection
+    }
     
-    // We clean <#> and newlines to keep it readable, but leave everything else intact
     let text = rawText.replace(/[<#>]/g, '').replace(/\n/g, ' ').replace(/\r/g, '').replace(/\s{2,}/g, ' ').trim();
     const cleanDestNum = String(destNum).replace('+', '');
     
@@ -205,26 +208,16 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum) => {
     if (trunkTxId) query.$or.push({ trxId: String(trunkTxId) });
     if (cleanDestNum) query.$or.push({ searchNumber: cleanDestNum }, { displayNumber: `+${cleanDestNum}` });
     
-    if (query.$or.length === 0) {
-        console.log(`🛑 [AUDIT FAIL] Missing TrxId & Number for MSG: ${text}`);
-        return;
-    }
+    if (query.$or.length === 0) return;
 
-    const existingOrders = await Order.find(query).sort({ _id: -1 }).limit(5); // Increased to 5
-    
-    if (existingOrders.length === 0) {
-        console.log(`🛑 [AUDIT FAIL] Order Not Found in DB for ${cleanDestNum} | MSG: ${text}`);
-        return;
-    }
+    const existingOrders = await Order.find(query).sort({ _id: -1 }).limit(5); 
+    if (existingOrders.length === 0) return;
 
     let baseOrder = existingOrders.find(o => o.status === "WAIT");
     if (!baseOrder) baseOrder = existingOrders[0]; 
 
     const orderAgeInMs = Date.now() - new Date(baseOrder.createdAt).getTime();
-    if (orderAgeInMs > 25 * 60 * 1000 || baseOrder.status === "FAIL" || baseOrder.status === "CANCEL") {
-        console.log(`🛑 [AUDIT FAIL] Order too old or canceled for ${cleanDestNum}`);
-        return; 
-    }
+    if (orderAgeInMs > 25 * 60 * 1000 || baseOrder.status === "FAIL" || baseOrder.status === "CANCEL") return;
     
     const strictOtp = extractStrictOTP(text);
     const isDuplicate = existingOrders.some(o => 
@@ -233,12 +226,8 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum) => {
         (strictOtp !== "00000" && o.otp === strictOtp)
     );
     
-    if (isDuplicate) {
-        console.log(`🛑 [AUDIT FAIL] Duplicate OTP detected for ${cleanDestNum} | OTP: ${strictOtp}`);
-        return;
-    }
+    if (isDuplicate) return; // Silent Duplicate Rejection
 
-    // --- OTP is Valid, let's process it ---
     let userEarned = 0; let agentEarned = 0;
     try {
         const actualUser = await User.findOne({ email: baseOrder.userEmail }).lean();
@@ -286,20 +275,16 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum) => {
     }
 };
 
-// 💥 THE UNSTOPPABLE ENGINE (300 Orders Capacity) 💥
+// 💥 THE UNSTOPPABLE ENGINE (Silent Mode) 💥
 let isPollingIPRN = false;
 const pollIPRNPendingOrders = async () => {
     if (isPollingIPRN) return;
-    
     const lockAcquired = await redis.set("iprn_poll_lock", "locked", "NX", "EX", 3);
     if (!lockAcquired) return; 
 
     isPollingIPRN = true;
     try {
-        // METHOD 1: GLOBAL FETCH (Limit 500 to catch everything from the provider)
-        const payload = { 
-            jsonrpc: "2.0", method: "sms.mdr_full:get_list", params: { limit: 500 }, id: Date.now() 
-        };
+        const payload = { jsonrpc: "2.0", method: "sms.mdr_full:get_list", params: { limit: 500 }, id: Date.now() };
         const res = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
         const data = await res.json();
         const messages = data?.result?.mdr_full_list || data?.result?.mdr_list || [];
@@ -310,12 +295,10 @@ const pollIPRNPendingOrders = async () => {
                 const text = msg.message || msg.text || msg.content || "";
                 const senderId = msg.senderid || msg.source_addr || "Unknown";
                 const destNum = msg.phone || msg.destination_addr || msg.number || "";
-                
-                if (text && destNum) await processIncomingOTP(trunkTxId, text, senderId, destNum);
+                if (text && destNum) await processIncomingOTP(trunkTxId, text, senderId, destNum, "no_id");
             }
         }
 
-        // 💥 METHOD 2: MASSIVE TARGETED FETCH (Capacity increased from 30 to 300!) 💥
         const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000); 
         const pendingOrders = await Order.find({ status: "WAIT", trxId: { $ne: "", $exists: true }, createdAt: { $gte: fifteenMinsAgo } }).sort({ _id: -1 }).limit(300).lean();
 
@@ -328,9 +311,8 @@ const pollIPRNPendingOrders = async () => {
                         const fallPayload = { jsonrpc: "2.0", method: "sms.realtime:get_message", params: { message_id: order.trxId }, id: Date.now() };
                         const fallRes = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(fallPayload) });
                         const fallData = await fallRes.json();
-                        
                         if (fallData?.result?.reply === "success" && fallData.result.message) {
-                            await processIncomingOTP(order.trxId, fallData.result.message, "Unknown", order.searchNumber);
+                            await processIncomingOTP(order.trxId, fallData.result.message, "Unknown", order.searchNumber, "no_id");
                         }
                     } catch(e) {}
                 }));
@@ -343,22 +325,30 @@ const pollIPRNPendingOrders = async () => {
         isPollingIPRN = false;
     }
 };
-// Runs every 4 seconds safely
 setInterval(pollIPRNPendingOrders, 4000);
 
+// 💥 ADVANCED WEBHOOK TRACKER 💥
 fastify.route({
     method: ['GET', 'POST'],
     url: '/v1/webhook/iprn-receive',
     handler: async (request, reply) => {
         try {
+            const reqIp = request.headers['cf-connecting-ip'] || request.headers['x-forwarded-for'] || request.ip;
             const data = request.method === 'GET' ? request.query : (request.body || {});
-            const trunkTxId = data.message_id || data.trunk_number_transaction_id || data.trxId;
-            const text = data.text || data.message || data.content;
-            const senderId = data.senderid || data.source_addr || "Unknown";
-            const destNum = data.destination_addr || data.number || data.b_number;
+            
+            console.log(`\n=========================================`);
+            console.log(`🔥 [WEBHOOK RAW HIT] Method: ${request.method} | IP: ${reqIp}`);
+            console.log(`📦 [PAYLOAD]: ${JSON.stringify(data)}`);
+            console.log(`=========================================\n`);
+
+            const trunkTxId = data.smsid || data.message_id || data.trunk_number_transaction_id || data.trxId;
+            const text = data.message || data.smstext || data.text || data.content;
+            const senderId = data.from || data.senderid || data.source_addr || "Unknown";
+            const destNum = data.to || data.called_number || data.destination_addr || data.number || data.b_number;
+            const smsId = data.smsid || data.smsid2 || "no_id";
             
             if (!text) return reply.status(400).send({ success: false, message: "No text found in payload" });
-            processIncomingOTP(trunkTxId, text, senderId, destNum).catch(console.error);
+            processIncomingOTP(trunkTxId, text, senderId, destNum, smsId).catch(console.error);
             return reply.status(200).send({ success: true, message: "Webhook processed" });
         } catch (error) { return reply.status(500).send({ success: false, message: "Internal Error" }); }
     }
@@ -407,7 +397,49 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
     } catch (error) { return reply.status(500).send({ meta: { status: "error" } }); }
 });
 
-fastify.get('/v1/active-ranges', async (request, reply) => reply.send({ success: true, data: [] }));
+// 💥 BOSS UPDATE: LIVE ROUTING MATRIX ENGINE (1-Hour HOT Data) 💥
+fastify.get('/v1/active-ranges', async (request, reply) => {
+    try {
+        const apiKey = request.headers['mapikey'];
+        if (!apiKey || apiKey.trim().length < 10) return reply.status(401).send({ success: false, message: "Invalid API Key" });
+
+        const cacheKey = "zenex_active_ranges";
+        const cachedData = await redis.get(cacheKey);
+        if (cachedData) {
+            return reply.send(JSON.parse(cachedData));
+        }
+
+        const oneHourAgo = new Date(Date.now() - 1 * 60 * 60 * 1000);
+        
+        const stats = await Order.aggregate([
+            { $match: { status: "DONE", updatedAt: { $gte: oneHourAgo }, requestedRange: { $exists: true, $ne: "" } } },
+            { $group: { _id: { range: "$requestedRange", service: "$trueService" }, hits: { $sum: 1 } } },
+            { $sort: { hits: -1 } },
+            { $limit: 100 }
+        ]);
+
+        const active_ranges = stats.map(s => ({
+            range: String(s._id.range).toUpperCase().replace(/X/g, '') + "XXX",
+            service: s._id.service || "Other",
+            tag: "General",
+            hits: s.hits
+        }));
+
+        const responseData = {
+            success: true,
+            cached: true,
+            message: "Global routing ranges fetched",
+            data: { active_ranges }
+        };
+
+        await redis.set(cacheKey, JSON.stringify(responseData), "EX", 60); 
+        
+        return reply.send({ ...responseData, cached: false });
+    } catch (error) {
+        return reply.status(500).send({ success: false, message: "Internal Server Error", data: { active_ranges: [] } });
+    }
+});
+
 fastify.get('/v1/user/today-otps', async (request, reply) => reply.type('text/plain').send("NO_DATA"));
 
 const startServer = async () => {
@@ -415,7 +447,7 @@ const startServer = async () => {
         await connectDB();
         await fetchSdeList(); 
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V7 (The Unstoppable Engine + Audit Radar) is LIVE!`);
+        console.log(`⚡ ZENEX Microservice V7 (Ultimate Hybrid Mode) is LIVE!`);
     } catch (err) { process.exit(1); }
 };
 startServer();
