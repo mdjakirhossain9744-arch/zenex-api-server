@@ -251,13 +251,21 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum) => {
     }
 };
 
-// 💥 ONLY WEBHOOK REMAINS (Zero CPU Load) 💥
+// 💥 THE BOSS UPDATE: RAW WEBHOOK TRACKER INJECTED 💥
 fastify.route({
     method: ['GET', 'POST'],
     url: '/v1/webhook/iprn-receive',
     handler: async (request, reply) => {
         try {
+            // Webhook Tracker System
+            const reqIp = request.headers['cf-connecting-ip'] || request.headers['x-forwarded-for'] || request.ip;
             const data = request.method === 'GET' ? request.query : (request.body || {});
+            
+            console.log(`\n=========================================`);
+            console.log(`🔥 [WEBHOOK RAW HIT] Method: ${request.method} | IP: ${reqIp}`);
+            console.log(`📦 [PAYLOAD]: ${JSON.stringify(data)}`);
+            console.log(`=========================================\n`);
+
             const trunkTxId = data.message_id || data.trunk_number_transaction_id || data.trxId;
             const text = data.text || data.message || data.content;
             const senderId = data.senderid || data.source_addr || "Unknown";
@@ -321,7 +329,7 @@ const startServer = async () => {
         await connectDB();
         await fetchSdeList(); 
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V7 (Pure Webhook Mode) is LIVE!`);
+        console.log(`⚡ ZENEX Microservice V7 (Pure Webhook & Tracker Mode) is LIVE!`);
     } catch (err) { process.exit(1); }
 };
 startServer();
