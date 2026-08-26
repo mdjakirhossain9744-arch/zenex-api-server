@@ -192,20 +192,21 @@ fastify.route({
     }
 });
 
-// 💥 THE OTP PROCESSOR (With Silent Multi-OTP Guard) 💥
+// 💥 THE OTP PROCESSOR (With Unique SMS-ID Resend Guard & Silent Cluster Lock) 💥
 const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId) => {
     if (!rawText) return;
 
-    if (smsId && smsId !== "no_id") {
-        const lockAcquired = await redis.set(`iprn_sms_${smsId}`, "locked", "NX", "EX", 86400); 
-        if (!lockAcquired) return; // Silent Duplicate Rejection
+    // 💥 BOSS UPGRADE: Redis Lock for 24H (Prevents Cluster Spams, but allows REAL Resends via new smsId) 💥
+    const uniqueKey = (smsId && smsId !== "no_id") ? smsId : trunkTxId;
+    if (uniqueKey) {
+        const lockAcquired = await redis.set(`iprn_sms_${uniqueKey}`, "locked", "NX", "EX", 86400); 
+        if (!lockAcquired) return; // Silent Duplicate Rejection (No Terminal Spam!)
     }
     
     let text = rawText.replace(/[<#>]/g, '').replace(/\n/g, ' ').replace(/\r/g, '').replace(/\s{2,}/g, ' ').trim();
     const cleanDestNum = String(destNum).replace('+', '');
     
     const query = { $or: [] };
-    if (trunkTxId) query.$or.push({ trxId: String(trunkTxId) });
     if (cleanDestNum) query.$or.push({ searchNumber: cleanDestNum }, { displayNumber: `+${cleanDestNum}` });
     
     if (query.$or.length === 0) return;
@@ -220,13 +221,8 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId) 
     if (orderAgeInMs > 25 * 60 * 1000 || baseOrder.status === "FAIL" || baseOrder.status === "CANCEL") return;
     
     const strictOtp = extractStrictOTP(text);
-    const isDuplicate = existingOrders.some(o => 
-        o.fullMessage === text || 
-        (o.fullMessage && o.fullMessage.includes(text)) || 
-        (strictOtp !== "00000" && o.otp === strictOtp)
-    );
     
-    if (isDuplicate) return; // Silent Duplicate Rejection
+    // 💥 TEXT MATCH DUPLICATE CHECKER REMOVED! System now trusts the Unique message_id for Multi-OTP 💥
 
     let userEarned = 0; let agentEarned = 0;
     try {
@@ -397,46 +393,68 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
     } catch (error) { return reply.status(500).send({ meta: { status: "error" } }); }
 });
 
-// 💥 BOSS UPDATE: LIVE ROUTING MATRIX ENGINE (1-Hour HOT Data) 💥
+// 💥 THE BOSS FIX: ACTIVE RANGES ENGINE RESTORED (1-Hour HOT Data, Top 10, Smart Tags) 💥
+let cachedActiveData = null;
+let lastFetchTime = 0;
+const CACHE_DURATION = 60 * 1000; 
+
 fastify.get('/v1/active-ranges', async (request, reply) => {
     try {
         const apiKey = request.headers['mapikey'];
         if (!apiKey || apiKey.trim().length < 10) return reply.status(401).send({ success: false, message: "Invalid API Key" });
 
-        const cacheKey = "zenex_active_ranges";
-        const cachedData = await redis.get(cacheKey);
-        if (cachedData) {
-            return reply.send(JSON.parse(cachedData));
+        if (cachedActiveData && (Date.now() - lastFetchTime < CACHE_DURATION)) {
+            return reply.send({ success: true, cached: true, message: "Global routing ranges fetched", data: cachedActiveData });
         }
 
-        const oneHourAgo = new Date(Date.now() - 1 * 60 * 60 * 1000);
+        const hiddenKeywords = await getMaskingKeywords();
+        const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
         
-        const stats = await Order.aggregate([
-            { $match: { status: "DONE", updatedAt: { $gte: oneHourAgo }, requestedRange: { $exists: true, $ne: "" } } },
-            { $group: { _id: { range: "$requestedRange", service: "$trueService" }, hits: { $sum: 1 } } },
-            { $sort: { hits: -1 } },
-            { $limit: 100 }
-        ]);
-
-        const active_ranges = stats.map(s => ({
-            range: String(s._id.range).toUpperCase().replace(/X/g, '') + "XXX",
-            service: s._id.service || "Other",
-            tag: "General",
-            hits: s.hits
-        }));
-
-        const responseData = {
-            success: true,
-            cached: true,
-            message: "Global routing ranges fetched",
-            data: { active_ranges }
-        };
-
-        await redis.set(cacheKey, JSON.stringify(responseData), "EX", 60); 
+        const recentOrders = await Order.find({ 
+            status: { $in: ["DONE", "Success", "SUCCESS"] }, 
+            updatedAt: { $gte: oneHourAgo } 
+        }).select("fullMessage otp searchNumber number trueService").lean();
         
-        return reply.send({ ...responseData, cached: false });
-    } catch (error) {
-        return reply.status(500).send({ success: false, message: "Internal Server Error", data: { active_ranges: [] } });
+        const rangeMap = {};
+
+        recentOrders.forEach((o) => {
+            let msg = o.fullMessage || o.otp || "";
+            let rawService = (o.trueService && o.trueService !== "Unknown" && o.trueService !== "Other") 
+                ? String(o.trueService) 
+                : extractServiceName(msg);
+                
+            const maskedService = applyMasking(rawService, hiddenKeywords); 
+
+            let num = o.searchNumber || o.number || "";
+            num = String(num).replace("+", "");
+            
+            if (num.length >= 6) {
+                const rangeStr = num.substring(0, 6) + "XXX"; 
+                let tag = "General";
+                
+                if (rawService.toLowerCase().includes("facebook") || rawService.toLowerCase().includes("meta")) {
+                    const match = msg.match(/\b\d{4,8}\b/);
+                    if (match) {
+                        if (match[0].length === 6 || match[0].length === 8) tag = "Fb Clone";
+                        else if (match[0].length === 5) tag = "New Fb";
+                    }
+                }
+                
+                const maskedTag = applyMasking(tag, hiddenKeywords); 
+
+                const key = `${rangeStr}|${maskedService}|${maskedTag}`;
+                if (!rangeMap[key]) rangeMap[key] = { range: rangeStr, service: maskedService, tag: maskedTag, hits: 0 };
+                rangeMap[key].hits += 1;
+            }
+        });
+
+        const formattedRanges = Object.values(rangeMap).sort((a, b) => b.hits - a.hits).slice(0, 10);
+        cachedActiveData = { active_ranges: formattedRanges };
+        lastFetchTime = Date.now();
+
+        return reply.send({ success: true, cached: false, message: "Global routing ranges fetched", data: cachedActiveData });
+    } catch (error) { 
+        return reply.status(500).send({ success: false, message: "Server Error", data: { active_ranges: [] } }); 
     }
 });
 
@@ -447,7 +465,7 @@ const startServer = async () => {
         await connectDB();
         await fetchSdeList(); 
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V7 (Ultimate Hybrid Mode) is LIVE!`);
+        console.log(`⚡ ZENEX Microservice V7 (Silent Poller + Multi-OTP Guard + Matrix) is LIVE!`);
     } catch (err) { process.exit(1); }
 };
 startServer();
