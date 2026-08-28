@@ -192,15 +192,13 @@ fastify.route({
     }
 });
 
-// 💥 THE OTP PROCESSOR (With Unique SMS-ID Resend Guard & Silent Cluster Lock) 💥
 const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId) => {
     if (!rawText) return;
 
-    // 💥 BOSS UPGRADE: Redis Lock for 24H (Prevents Cluster Spams, but allows REAL Resends via new smsId) 💥
     const uniqueKey = (smsId && smsId !== "no_id") ? smsId : trunkTxId;
     if (uniqueKey) {
         const lockAcquired = await redis.set(`iprn_sms_${uniqueKey}`, "locked", "NX", "EX", 86400); 
-        if (!lockAcquired) return; // Silent Duplicate Rejection (No Terminal Spam!)
+        if (!lockAcquired) return; 
     }
     
     let text = rawText.replace(/[<#>]/g, '').replace(/\n/g, ' ').replace(/\r/g, '').replace(/\s{2,}/g, ' ').trim();
@@ -221,8 +219,6 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId) 
     if (orderAgeInMs > 25 * 60 * 1000 || baseOrder.status === "FAIL" || baseOrder.status === "CANCEL") return;
     
     const strictOtp = extractStrictOTP(text);
-    
-    // 💥 TEXT MATCH DUPLICATE CHECKER REMOVED! System now trusts the Unique message_id for Multi-OTP 💥
 
     let userEarned = 0; let agentEarned = 0;
     try {
@@ -271,7 +267,6 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId) 
     }
 };
 
-// 💥 THE UNSTOPPABLE ENGINE (Silent Mode) 💥
 let isPollingIPRN = false;
 const pollIPRNPendingOrders = async () => {
     if (isPollingIPRN) return;
@@ -323,14 +318,16 @@ const pollIPRNPendingOrders = async () => {
 };
 setInterval(pollIPRNPendingOrders, 4000);
 
-// 💥 ADVANCED WEBHOOK TRACKER 💥
+// 💥 BOSS UPGRADE: THE WEIRD POSTBACK CATCHER 💥
 fastify.route({
     method: ['GET', 'POST'],
     url: '/v1/webhook/iprn-receive',
     handler: async (request, reply) => {
         try {
             const reqIp = request.headers['cf-connecting-ip'] || request.headers['x-forwarded-for'] || request.ip;
-            const data = request.method === 'GET' ? request.query : (request.body || {});
+            
+            // 💥 THE MAGIC LINE: Merges URL Query and Body regardless of method!
+            const data = { ...(request.query || {}), ...(request.body || {}) };
             
             console.log(`\n=========================================`);
             console.log(`🔥 [WEBHOOK RAW HIT] Method: ${request.method} | IP: ${reqIp}`);
@@ -393,7 +390,6 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
     } catch (error) { return reply.status(500).send({ meta: { status: "error" } }); }
 });
 
-// 💥 THE BOSS FIX: ACTIVE RANGES ENGINE RESTORED (1-Hour HOT Data, Top 10, Smart Tags) 💥
 let cachedActiveData = null;
 let lastFetchTime = 0;
 const CACHE_DURATION = 60 * 1000; 
@@ -465,7 +461,7 @@ const startServer = async () => {
         await connectDB();
         await fetchSdeList(); 
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V7 (Silent Poller + Multi-OTP Guard + Matrix) is LIVE!`);
+        console.log(`⚡ ZENEX Microservice V7 (The Hybrid Master) is LIVE!`);
     } catch (err) { process.exit(1); }
 };
 startServer();
