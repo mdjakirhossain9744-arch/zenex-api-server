@@ -224,13 +224,12 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId) 
     try {
         const actualUser = await User.findOne({ email: baseOrder.userEmail }).lean();
         if (actualUser) {
-            const lowerText = text.toLowerCase();
-            const isFreeService = lowerText.includes("whatsapp") || lowerText.includes("telegram") || lowerText.includes("t.me");
-            let rawOtpCost = isFreeService ? 0 : (Number(actualUser.otpRate) || 0);
+            // 💥 BOSS UPDATE: All services (including WhatsApp/Telegram) now receive normal pay rate 💥
+            let rawOtpCost = Number(actualUser.otpRate) || 0;
             userEarned = Math.abs(rawOtpCost);
             
             let actualAgent = null;
-            if (!isFreeService && actualUser.agentEmail && actualUser.agentEmail !== "admin") {
+            if (actualUser.agentEmail && actualUser.agentEmail !== "admin") {
                 actualAgent = await User.findOne({ $or: [ { email: actualUser.agentEmail }, { customAgentMail: actualUser.agentEmail } ], role: "agent" }).lean();
                 if (actualAgent) {
                     const aRate = Number(actualAgent.agentMaxRate || 0.70);
@@ -318,15 +317,12 @@ const pollIPRNPendingOrders = async () => {
 };
 setInterval(pollIPRNPendingOrders, 4000);
 
-// 💥 BOSS UPGRADE: THE WEIRD POSTBACK CATCHER 💥
 fastify.route({
     method: ['GET', 'POST'],
     url: '/v1/webhook/iprn-receive',
     handler: async (request, reply) => {
         try {
             const reqIp = request.headers['cf-connecting-ip'] || request.headers['x-forwarded-for'] || request.ip;
-            
-            // 💥 THE MAGIC LINE: Merges URL Query and Body regardless of method!
             const data = { ...(request.query || {}), ...(request.body || {}) };
             
             console.log(`\n=========================================`);
@@ -461,7 +457,7 @@ const startServer = async () => {
         await connectDB();
         await fetchSdeList(); 
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V7 (The Hybrid Master) is LIVE!`);
+        console.log(`⚡ ZENEX Microservice V7 (Silent Poller + Multi-OTP Guard + Matrix) is LIVE!`);
     } catch (err) { process.exit(1); }
 };
 startServer();
