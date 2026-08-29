@@ -193,6 +193,10 @@ fastify.route({
 });
 
 const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId) => {
+    if (senderId && senderId !== "Unknown") {
+        console.log(`🔥 [OFFICIAL SENDER ID DETECTED]: ${senderId}`);
+    }
+    
     if (!rawText) return;
 
     const uniqueKey = (smsId && smsId !== "no_id") ? smsId : trunkTxId;
@@ -247,7 +251,7 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId) 
     } catch (balanceErr) {}
 
     let detectedService = extractServiceName(text);
-    let finalTrueService = detectedService !== "Other" ? detectedService : (senderId && senderId !== "Unknown" ? senderId : "Other");
+    let finalTrueService = (senderId && senderId !== "Unknown") ? senderId : (detectedService !== "Other" ? detectedService : "Other");
 
     if (baseOrder.status === "WAIT") {
         baseOrder.status = "DONE"; baseOrder.otp = strictOtp; baseOrder.fullMessage = text; 
@@ -302,7 +306,7 @@ const pollIPRNPendingOrders = async () => {
                         const fallRes = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(fallPayload) });
                         const fallData = await fallRes.json();
                         if (fallData?.result?.reply === "success" && fallData.result.message) {
-                            await processIncomingOTP(order.trxId, fallData.result.message, "Unknown", order.searchNumber, "no_id");
+                            await processIncomingOTP(order.trxId, fallData.result.message, fallData.result.senderid || "Unknown", order.searchNumber, "no_id");
                         }
                     } catch(e) {}
                 }));
