@@ -193,10 +193,13 @@ fastify.route({
 });
 
 const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId) => {
-    if (senderId && senderId !== "Unknown") {
-        console.log(`🔥 [OFFICIAL SENDER ID DETECTED]: ${senderId}`);
+    // 🚨 BOSS UPDATE: Observability Logger - No crash, Just clear logs 🚨
+    if (senderId && senderId !== "Unknown" && senderId.trim() !== "") {
+        console.log(`📡 [API SENDER ID STATUS] - RECEIVED: ${senderId} (For Dest: ${destNum})`);
+    } else {
+        console.log(`⚠️ [API SENDER ID STATUS] - MISSING/NOT SENT by Provider (For Dest: ${destNum}) - Using Text Fallback`);
     }
-    
+
     if (!rawText) return;
 
     const uniqueKey = (smsId && smsId !== "no_id") ? smsId : trunkTxId;
@@ -228,7 +231,6 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId) 
     try {
         const actualUser = await User.findOne({ email: baseOrder.userEmail }).lean();
         if (actualUser) {
-            // 💥 BOSS UPDATE: All services (including WhatsApp/Telegram) now receive normal pay rate 💥
             let rawOtpCost = Number(actualUser.otpRate) || 0;
             userEarned = Math.abs(rawOtpCost);
             
@@ -250,8 +252,9 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId) 
         }
     } catch (balanceErr) {}
 
+    // 🚨 Original Text-based Fallback intact so system never crashes or shows weird outputs 🚨
     let detectedService = extractServiceName(text);
-    let finalTrueService = (senderId && senderId !== "Unknown") ? senderId : (detectedService !== "Other" ? detectedService : "Other");
+    let finalTrueService = detectedService !== "Other" ? detectedService : (senderId && senderId !== "Unknown" ? senderId : "Other");
 
     if (baseOrder.status === "WAIT") {
         baseOrder.status = "DONE"; baseOrder.otp = strictOtp; baseOrder.fullMessage = text; 
@@ -287,7 +290,7 @@ const pollIPRNPendingOrders = async () => {
             for (const msg of messages) {
                 const trunkTxId = msg.message_id || msg.trunk_number_transaction_id || "";
                 const text = msg.message || msg.text || msg.content || "";
-                const senderId = msg.senderid || msg.source_addr || "Unknown";
+                const senderId = msg.senderid || msg.sender_id || msg.source_addr || msg.from || msg.sender || "Unknown";
                 const destNum = msg.phone || msg.destination_addr || msg.number || "";
                 if (text && destNum) await processIncomingOTP(trunkTxId, text, senderId, destNum, "no_id");
             }
@@ -306,7 +309,8 @@ const pollIPRNPendingOrders = async () => {
                         const fallRes = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(fallPayload) });
                         const fallData = await fallRes.json();
                         if (fallData?.result?.reply === "success" && fallData.result.message) {
-                            await processIncomingOTP(order.trxId, fallData.result.message, fallData.result.senderid || "Unknown", order.searchNumber, "no_id");
+                            const rawSender = fallData.result.senderid || fallData.result.sender_id || fallData.result.source_addr || fallData.result.from || fallData.result.sender || "Unknown";
+                            await processIncomingOTP(order.trxId, fallData.result.message, rawSender, order.searchNumber, "no_id");
                         }
                     } catch(e) {}
                 }));
@@ -336,7 +340,7 @@ fastify.route({
 
             const trunkTxId = data.smsid || data.message_id || data.trunk_number_transaction_id || data.trxId;
             const text = data.message || data.smstext || data.text || data.content;
-            const senderId = data.from || data.senderid || data.source_addr || "Unknown";
+            const senderId = data.from || data.senderid || data.sender_id || data.source_addr || "Unknown";
             const destNum = data.to || data.called_number || data.destination_addr || data.number || data.b_number;
             const smsId = data.smsid || data.smsid2 || "no_id";
             
