@@ -224,7 +224,6 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId) 
     try {
         const actualUser = await User.findOne({ email: baseOrder.userEmail }).lean();
         if (actualUser) {
-            // 💥 BOSS UPDATE: All services (including WhatsApp/Telegram) now receive normal pay rate 💥
             let rawOtpCost = Number(actualUser.otpRate) || 0;
             userEarned = Math.abs(rawOtpCost);
             
@@ -317,31 +316,44 @@ const pollIPRNPendingOrders = async () => {
 };
 setInterval(pollIPRNPendingOrders, 4000);
 
-fastify.route({
-    method: ['GET', 'POST'],
-    url: '/v1/webhook/iprn-receive',
-    handler: async (request, reply) => {
-        try {
-            const reqIp = request.headers['cf-connecting-ip'] || request.headers['x-forwarded-for'] || request.ip;
-            const data = { ...(request.query || {}), ...(request.body || {}) };
-            
-            console.log(`\n=========================================`);
-            console.log(`🔥 [WEBHOOK RAW HIT] Method: ${request.method} | IP: ${reqIp}`);
-            console.log(`📦 [PAYLOAD]: ${JSON.stringify(data)}`);
-            console.log(`=========================================\n`);
+// 💥 BOSS FIX: GLOBAL WEBHOOK HANDLER (CATCHES BOTH TYPOS & EXACT ROUTES) 💥
+const webhookHandler = async (request, reply) => {
+    try {
+        const reqIp = request.headers['cf-connecting-ip'] || request.headers['x-forwarded-for'] || request.ip;
+        const data = { ...(request.query || {}), ...(request.body || {}) };
+        
+        // 🚨 SUPER VISIBLE TERMINAL LOGGER 🚨
+        console.log(`\n====================================================================`);
+        console.log(`🚀 [DIRECT WEBHOOK HIT DETECTED] 🚀`);
+        console.log(`⏰ Time : ${new Date().toLocaleString()}`);
+        console.log(`🌐 Route: ${request.url}`);
+        console.log(`📡 IP   : ${reqIp}`);
+        console.log(`📩 DATA :`, JSON.stringify(data, null, 2));
+        console.log(`====================================================================\n`);
 
-            const trunkTxId = data.smsid || data.message_id || data.trunk_number_transaction_id || data.trxId;
-            const text = data.message || data.smstext || data.text || data.content;
-            const senderId = data.from || data.senderid || data.source_addr || "Unknown";
-            const destNum = data.to || data.called_number || data.destination_addr || data.number || data.b_number;
-            const smsId = data.smsid || data.smsid2 || "no_id";
-            
-            if (!text) return reply.status(400).send({ success: false, message: "No text found in payload" });
-            processIncomingOTP(trunkTxId, text, senderId, destNum, smsId).catch(console.error);
-            return reply.status(200).send({ success: true, message: "Webhook processed" });
-        } catch (error) { return reply.status(500).send({ success: false, message: "Internal Error" }); }
+        const trunkTxId = data.smsid || data.message_id || data.trunk_number_transaction_id || data.trxId;
+        const text = data.message || data.smstext || data.text || data.content;
+        const senderId = data.from || data.senderid || data.source_addr || "Unknown";
+        const destNum = data.to || data.called_number || data.destination_addr || data.number || data.b_number;
+        const smsId = data.smsid || data.smsid2 || "no_id";
+        
+        if (!text && !destNum) {
+            console.log(`❌ [WEBHOOK FAILED] No readable data found in payload!`);
+            return reply.status(400).send({ success: false, message: "No valid text or destination found in payload" });
+        }
+
+        processIncomingOTP(trunkTxId, text, senderId, destNum, smsId).catch(console.error);
+        return reply.status(200).send({ success: true, message: "Webhook processed perfectly!" });
+    } catch (error) { 
+        console.error("Webhook Internal Error:", error);
+        return reply.status(500).send({ success: false, message: "Internal Error" }); 
     }
-});
+};
+
+// Registering BOTH correct spelling and Provider's typo spelling to be 100% safe!
+fastify.route({ method: ['GET', 'POST'], url: '/v1/webhook/iprn-receive', handler: webhookHandler });
+fastify.route({ method: ['GET', 'POST'], url: '/v1/webhook/ipm-receive', handler: webhookHandler });
+
 
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
     try {
@@ -457,7 +469,7 @@ const startServer = async () => {
         await connectDB();
         await fetchSdeList(); 
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V7 (Silent Poller + Multi-OTP Guard + Matrix) is LIVE!`);
+        console.log(`⚡ ZENEX Microservice V7 (Direct Webhook Engine + Multi-OTP Guard) is LIVE!`);
     } catch (err) { process.exit(1); }
 };
 startServer();
