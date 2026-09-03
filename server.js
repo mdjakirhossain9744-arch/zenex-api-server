@@ -314,14 +314,12 @@ const pollIPRNPendingOrders = async () => {
             }
         }
     } catch (error) {
-        // Silent error handling
+        console.error("Unstoppable Engine Error:", error.message);
     } finally {
         isPollingIPRN = false;
     }
 };
-
-// 🛑🛑🛑 BOSS ACTION: TEMPORARILY DISABLED POLLING ENGINE TO TEST WEBHOOK 🛑🛑🛑
-// setInterval(pollIPRNPendingOrders, 4000); 
+setInterval(pollIPRNPendingOrders, 4000);
 
 // 💥 BOSS FIX: GLOBAL WEBHOOK HANDLER (CATCHES EVERYTHING) 💥
 const webhookHandler = async (request, reply) => {
