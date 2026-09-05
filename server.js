@@ -283,14 +283,13 @@ const pollIPRNPendingOrders = async () => {
         const data = await res.json();
         const messages = data?.result?.mdr_full_list || data?.result?.mdr_list || [];
         
-                if (messages.length > 0) {
-            // 🔥 BOSS LOGGER: TO SEE THE EXACT PURE RAW DATA FROM PROVIDER 🔥
-            console.log(`\n=================== [KHAATI RAW DATA] ===================`);
-            console.log(`📡 Pulled ${messages.length} SMS. Here is the exact RAW Data:`);
-            console.log(JSON.stringify(messages[0], null, 2)); // প্রোভাইডারের পাঠানো হুবহু খাঁটি ডেটা
-            console.log(`=========================================================\n`);
-
+        if (messages.length > 0) {
             for (const msg of messages) {
+                // 🔥 BOSS LOGGER: TO SEE THE EXACT PURE RAW DATA EVERY TIME 🔥
+                console.log(`\n=================== [KHAATI RAW DATA] ===================`);
+                console.log(JSON.stringify(msg, null, 2));
+                console.log(`=========================================================\n`);
+
                 const trunkTxId = msg.message_id || msg.trunk_number_transaction_id || "";
                 const text = msg.message || msg.text || msg.content || "";
                 const senderId = msg.senderid || msg.source_addr || "Unknown";
@@ -420,7 +419,6 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
     } catch (error) { return reply.status(500).send({ meta: { status: "error" } }); }
 });
 
-// 💥 BOSS UPGRADE: TOP 10 RANGES PER SERVICE WITH EXACT NAMES FOR BOTS 💥
 let cachedActiveData = null;
 let lastFetchTime = 0;
 const CACHE_DURATION = 60 * 1000; 
@@ -449,7 +447,6 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
         recentOrders.forEach((o) => {
             let msg = o.fullMessage || o.otp || "";
             
-            // Getting exact trueService without masking
             let rawService = (o.trueService && o.trueService !== "Unknown" && o.trueService !== "Other") 
                 ? String(o.trueService) 
                 : extractServiceName(msg);
@@ -486,7 +483,6 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
             }
         });
 
-        // 💥 Grouping logic: strictly top 10 per service
         const groupedByService = {};
         Object.values(rangeMap).forEach(route => {
             if (!groupedByService[route.service]) {
@@ -498,7 +494,7 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
         const finalFormattedRanges = [];
         for (const serviceName in groupedByService) {
             const sortedRanges = groupedByService[serviceName].sort((a, b) => b.hits - a.hits);
-            finalFormattedRanges.push(...sortedRanges.slice(0, 10)); // exactly top 10 per service
+            finalFormattedRanges.push(...sortedRanges.slice(0, 10));
         }
 
         finalFormattedRanges.sort((a, b) => b.hits - a.hits);
