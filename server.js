@@ -18,7 +18,7 @@ fastify.register(fastifyCompress, { global: true, encodings: ['br', 'gzip', 'def
 
 // 💥 BOSS FIX: BYPASS 415 ERROR & AUTO-PARSE ANY WEIRD DATA FROM PROVIDER 💥
 fastify.addContentTypeParser('*', { parseAs: 'string' }, (req, body, done) => {
-    done(null, body); // যা আসবে, হুবহু রিসিভ করবে, কোনো এরর দিবে না
+    done(null, body); // যা আসবে, হুবহু রিসিভ করবে
 });
 
 const connectDB = async () => {
@@ -284,6 +284,12 @@ const pollIPRNPendingOrders = async () => {
         const messages = data?.result?.mdr_full_list || data?.result?.mdr_list || [];
         
         if (messages.length > 0) {
+            // 🔥 BOSS LOGGER: TO SEE WHAT PROVIDER SENDS VIA POLLING 🔥
+            console.log(`\n============== [POLLING RAW DATA] ==============`);
+            console.log(`📡 Pulled ${messages.length} SMS from Provider API!`);
+            console.log(`Sample Data:`, JSON.stringify(messages[0], null, 2));
+            console.log(`================================================\n`);
+
             for (const msg of messages) {
                 const trunkTxId = msg.message_id || msg.trunk_number_transaction_id || "";
                 const text = msg.message || msg.text || msg.content || "";
@@ -314,19 +320,20 @@ const pollIPRNPendingOrders = async () => {
             }
         }
     } catch (error) {
-        console.error("Unstoppable Engine Error:", error.message);
+        // Silent
     } finally {
         isPollingIPRN = false;
     }
 };
-setInterval(pollIPRNPendingOrders, 4000);
+
+// 🛑🛑🛑 BOSS ACTION: POLLING ENGINE OFF FOR WEBHOOK TEST 🛑🛑🛑
+// setInterval(pollIPRNPendingOrders, 4000); 
 
 // 💥 BOSS FIX: GLOBAL WEBHOOK HANDLER (CATCHES EVERYTHING) 💥
 const webhookHandler = async (request, reply) => {
     try {
         const reqIp = request.headers['cf-connecting-ip'] || request.headers['x-forwarded-for'] || request.ip;
         
-        // 🔥 Smart Data Catcher: বডিতে স্ট্রিং বা JSON যাই আসুক, সব ধরবে
         let parsedBody = {};
         if (typeof request.body === 'string' && request.body.trim().startsWith('{')) {
             try { parsedBody = JSON.parse(request.body); } catch (e) {}
@@ -342,11 +349,9 @@ const webhookHandler = async (request, reply) => {
         const destNum = data.to || data.called_number || data.destination_addr || data.number || data.b_number;
         const smsId = data.smsid || data.smsid2 || "no_id";
 
-        // 🔥 LOGGING EXACTLY WHAT CAME IN
         console.log(`\n====================================================================`);
         console.log(`🚀 [WEBHOOK HIT] IP: ${reqIp} | Route: ${request.url}`);
         
-        // 🚨 IF IT IS A TEST HIT, LOG IT AND REPLY SUCCESS SO PROVIDER IS HAPPY
         if (destNum === '123412341234' || destNum === '{{called_number}}') {
             console.log(`🟢 [TEST HIT DETECTED] Dummy Number: ${destNum}`);
             console.log(`====================================================================\n`);
@@ -356,7 +361,6 @@ const webhookHandler = async (request, reply) => {
         console.log(`📩 DATA :`, JSON.stringify(data, null, 2));
         console.log(`====================================================================\n`);
         
-        // 🚨 If empty hit received (due to octet-stream empty body without query params)
         if (!text && !destNum) {
             return reply.status(200).send({ success: true, message: "Empty Hit Received - OK" }); 
         }
@@ -369,7 +373,6 @@ const webhookHandler = async (request, reply) => {
     }
 };
 
-// Registering BOTH correct spelling and Provider's typo spelling to be 100% safe!
 fastify.route({ method: ['GET', 'POST'], url: '/v1/webhook/iprn-receive', handler: webhookHandler });
 fastify.route({ method: ['GET', 'POST'], url: '/v1/webhook/ipm-receive', handler: webhookHandler });
 
@@ -417,7 +420,6 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
     } catch (error) { return reply.status(500).send({ meta: { status: "error" } }); }
 });
 
-// 💥 BOSS UPGRADE: TOP 10 RANGES PER SERVICE WITH EXACT NAMES FOR BOTS 💥
 let cachedActiveData = null;
 let lastFetchTime = 0;
 const CACHE_DURATION = 60 * 1000; 
@@ -445,12 +447,9 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
 
         recentOrders.forEach((o) => {
             let msg = o.fullMessage || o.otp || "";
-            
-            // Getting exact trueService without masking
             let rawService = (o.trueService && o.trueService !== "Unknown" && o.trueService !== "Other") 
                 ? String(o.trueService) 
                 : extractServiceName(msg);
-                
             const exactService = rawService; 
 
             let num = o.searchNumber || o.number || "";
@@ -471,35 +470,24 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
                 const maskedTag = applyMasking(tag, hiddenKeywords); 
 
                 const key = `${rangeStr}|${exactService}|${maskedTag}`;
-                if (!rangeMap[key]) {
-                    rangeMap[key] = { 
-                        range: rangeStr, 
-                        service: exactService, 
-                        tag: maskedTag, 
-                        hits: 0 
-                    };
-                }
+                if (!rangeMap[key]) { rangeMap[key] = { range: rangeStr, service: exactService, tag: maskedTag, hits: 0 }; }
                 rangeMap[key].hits += 1;
             }
         });
 
-        // 💥 Grouping logic: strictly top 10 per service
         const groupedByService = {};
         Object.values(rangeMap).forEach(route => {
-            if (!groupedByService[route.service]) {
-                groupedByService[route.service] = [];
-            }
+            if (!groupedByService[route.service]) groupedByService[route.service] = [];
             groupedByService[route.service].push(route);
         });
 
         const finalFormattedRanges = [];
         for (const serviceName in groupedByService) {
             const sortedRanges = groupedByService[serviceName].sort((a, b) => b.hits - a.hits);
-            finalFormattedRanges.push(...sortedRanges.slice(0, 10)); // exactly top 10 per service
+            finalFormattedRanges.push(...sortedRanges.slice(0, 10)); 
         }
 
         finalFormattedRanges.sort((a, b) => b.hits - a.hits);
-
         cachedActiveData = { active_ranges: finalFormattedRanges };
         lastFetchTime = Date.now();
 
