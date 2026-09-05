@@ -295,7 +295,7 @@ const pollIPRNPendingOrders = async () => {
 
     isPollingIPRN = true;
     try {
-        // ১. মেইন রাস্তা (get_list) - এখান দিয়ে Sender ID আসে
+        // ১. মেইন রাস্তা (get_list)
         const payload = { jsonrpc: "2.0", method: "sms.mdr_full:get_list", params: { limit: 500 }, id: Date.now() };
         const res = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
         const data = await res.json();
@@ -312,8 +312,7 @@ const pollIPRNPendingOrders = async () => {
             }
         }
         
-        // 🛑🛑🛑 BOSS ACTION: Fallback (get_message) is TEMPORARILY DISABLED to test get_list only 🛑🛑🛑
-        /*
+        // 💥 BOSS ACTION: Fallback (get_message) is NOW ACTIVE AGAIN! 💥
         const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000); 
         const pendingOrders = await Order.find({ status: "WAIT", trxId: { $ne: "", $exists: true }, createdAt: { $gte: fifteenMinsAgo } }).sort({ _id: -1 }).limit(300).lean();
 
@@ -327,6 +326,7 @@ const pollIPRNPendingOrders = async () => {
                         const fallRes = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(fallPayload) });
                         const fallData = await fallRes.json();
                         if (fallData?.result?.reply === "success" && fallData.result.message) {
+                            // 💥 BOSS MULTI-OTP FIX: Fallback থেকেও আসল message_id টা ধরে নিচ্ছি 💥
                             const fallbackSmsId = fallData.result.message_id || "no_id";
                             await processIncomingOTP(order.trxId, fallData.result.message, "Unknown", order.searchNumber, fallbackSmsId, "POLLING-FALLBACK", fallData.result);
                         }
@@ -335,13 +335,11 @@ const pollIPRNPendingOrders = async () => {
                 await new Promise(r => setTimeout(r, 150));
             }
         }
-        */
     } catch (error) {
     } finally {
         isPollingIPRN = false;
     }
 };
-
 setInterval(pollIPRNPendingOrders, 4000); 
 
 const webhookHandler = async (request, reply) => {
