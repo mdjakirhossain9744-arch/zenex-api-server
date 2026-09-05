@@ -116,7 +116,6 @@ fastify.route({
     method: ['GET', 'POST'], 
     url: '/v1/getnum',
     handler: async (request, reply) => {
-        // [Existing getnum code remains identical, omitted for brevity but FULLY intact below]
         try {
             const apiKey = request.headers['mapikey'] || (request.query && request.query.mapikey);
             if (!apiKey || apiKey.trim().length < 10) return reply.status(401).send({ meta: { status: "error" }, message: "Invalid API Key" });
@@ -190,20 +189,20 @@ fastify.route({
 const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, source = "UNKNOWN", fullRawJson = {}) => {
     if (!rawText) return;
 
-    // 🔥 SAVE EXACT RAW JSON DATA TO REDIS SO YOU CAN VIEW VIA API 🔥
     if (destNum) {
         const cleanTargetNum = String(destNum).replace(/\D/g, "");
         const debugLog = {
             timestamp: new Date().toISOString(),
-            source: source, // "WEBHOOK" or "POLLING"
+            source: source,
             extractedData: { trunkTxId, senderId, smsId, text: rawText },
-            raw_payload: fullRawJson // <--- This contains EVERY variable the provider sent!
+            raw_payload: fullRawJson 
         };
         await redis.lpush(`raw_debug_${cleanTargetNum}`, JSON.stringify(debugLog));
         await redis.ltrim(`raw_debug_${cleanTargetNum}`, 0, 19); 
         await redis.expire(`raw_debug_${cleanTargetNum}`, 86400); 
     }
 
+    // 💥 MULTI-OTP UNIQUE ID LOGIC 💥
     const uniqueKey = (smsId && smsId !== "no_id") ? smsId : trunkTxId;
     if (uniqueKey) {
         const lockAcquired = await redis.set(`iprn_sms_${uniqueKey}`, "locked", "NX", "EX", 86400); 
@@ -256,18 +255,23 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
     let detectedService = extractServiceName(text);
     let finalTrueService = detectedService !== "Other" ? detectedService : (senderId && senderId !== "Unknown" ? senderId : "Other");
 
-    // 🔥 LOG TO TERMINAL EXPLICITLY SHOWING SOURCE (POLLING OR WEBHOOK) 🔥
     if (baseOrder.status === "WAIT") {
         baseOrder.status = "DONE"; baseOrder.otp = strictOtp; baseOrder.fullMessage = text; 
         baseOrder.trueService = finalTrueService; baseOrder.orderCost = userEarned; baseOrder.orderCommission = agentEarned; 
+        
+        // 💥 UPDATE MAIN ORDER TRX ID SO MULTI-OTP TRACKING WORKS
+        if (uniqueKey && uniqueKey !== "no_id") baseOrder.trxId = uniqueKey; 
+
         await baseOrder.save();
         console.log(`✅ [${source}] DELIVERED -> ${cleanDestNum} | App: ${finalTrueService} | OTP: ${strictOtp}`);
     } else {
+        // 💥 SAVE NEW MULTI-OTP WITH EXACT UNIQUE ID (trunkTxId) SO IT DOES NOT OVERLAP 💥
         const newMultiOrder = new Order({
             userEmail: baseOrder.userEmail, userName: baseOrder.userName, userUid: baseOrder.userUid, agentEmail: baseOrder.agentEmail,
             searchNumber: baseOrder.searchNumber, displayNumber: baseOrder.displayNumber, country: baseOrder.country, operator: baseOrder.operator,
             dateString: baseOrder.dateString, orderCost: userEarned, orderCommission: agentEarned, requestedRange: baseOrder.requestedRange,
-            trxId: baseOrder.trxId, status: "DONE", otp: strictOtp, fullMessage: text, trueService: finalTrueService, expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
+            trxId: uniqueKey !== "no_id" ? uniqueKey : baseOrder.trxId, // <-- THE MAGIC FIX!
+            status: "DONE", otp: strictOtp, fullMessage: text, trueService: finalTrueService, expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
         });
         await newMultiOrder.save();
         console.log(`✅ [${source}] MULTI-DELIVERED -> ${cleanDestNum} | App: ${finalTrueService} | OTP: ${strictOtp}`);
@@ -294,12 +298,11 @@ const pollIPRNPendingOrders = async () => {
                 const senderId = msg.senderid || msg.source_addr || "Unknown";
                 const destNum = msg.phone || msg.destination_addr || msg.number || "";
                 
-                // Pass "POLLING" as source and `msg` as the fullRawJson
-                if (text && destNum) await processIncomingOTP(trunkTxId, text, senderId, destNum, "no_id", "POLLING", msg);
+                // 💥 Pass trunkTxId as smsId explicitly so it saves correctly! 💥
+                if (text && destNum) await processIncomingOTP(trunkTxId, text, senderId, destNum, trunkTxId, "POLLING-MAIN", msg);
             }
         }
         
-        // Error fallback fetching logic...
         const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000); 
         const pendingOrders = await Order.find({ status: "WAIT", trxId: { $ne: "", $exists: true }, createdAt: { $gte: fifteenMinsAgo } }).sort({ _id: -1 }).limit(300).lean();
 
@@ -313,7 +316,7 @@ const pollIPRNPendingOrders = async () => {
                         const fallRes = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(fallPayload) });
                         const fallData = await fallRes.json();
                         if (fallData?.result?.reply === "success" && fallData.result.message) {
-                            await processIncomingOTP(order.trxId, fallData.result.message, "Unknown", order.searchNumber, "no_id", "POLLING", fallData.result);
+                            await processIncomingOTP(order.trxId, fallData.result.message, "Unknown", order.searchNumber, "no_id", "POLLING-FALLBACK", fallData.result);
                         }
                     } catch(e) {}
                 }));
@@ -354,7 +357,6 @@ const webhookHandler = async (request, reply) => {
             return reply.status(200).send({ success: true, message: "Empty Hit Received - OK" }); 
         }
 
-        // Pass "WEBHOOK" as source and `data` as the fullRawJson
         processIncomingOTP(trunkTxId, text, senderId, destNum, smsId, "WEBHOOK", data).catch(console.error);
         return reply.status(200).send({ success: true, message: "Webhook processed perfectly!" });
     } catch (error) { 
@@ -365,7 +367,6 @@ const webhookHandler = async (request, reply) => {
 fastify.route({ method: ['GET', 'POST'], url: '/v1/webhook/iprn-receive', handler: webhookHandler });
 fastify.route({ method: ['GET', 'POST'], url: '/v1/webhook/ipm-receive', handler: webhookHandler });
 
-// 🔥 BOSS API: ব্রাউজার থেকে যেকোনো নাম্বারের খাঁটি ডেটা দেখার লিংক 🔥
 fastify.get('/v1/check-data', async (request, reply) => {
     try {
         const num = request.query.number;
@@ -384,6 +385,8 @@ fastify.get('/v1/check-data', async (request, reply) => {
         return reply.status(500).send({ success: false, message: "Error fetching data" });
     }
 });
+
+// ... [Existing routes /v1/numsuccess/info & /v1/active-ranges remain fully intact below] ...
 
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
     try {
@@ -433,7 +436,6 @@ let lastFetchTime = 0;
 const CACHE_DURATION = 60 * 1000; 
 
 fastify.get('/v1/active-ranges', async (request, reply) => {
-    // ... [Active Ranges Logic untouched for brevity but FULLY INTACT in production] ...
     try {
         const apiKey = request.headers['mapikey'] || (request.query && request.query.mapikey);
         if (!apiKey || apiKey.trim().length < 10) {
