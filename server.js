@@ -18,7 +18,7 @@ fastify.register(fastifyCompress, { global: true, encodings: ['br', 'gzip', 'def
 
 // 💥 BOSS FIX: BYPASS 415 ERROR & AUTO-PARSE ANY WEIRD DATA FROM PROVIDER 💥
 fastify.addContentTypeParser('*', { parseAs: 'string' }, (req, body, done) => {
-    done(null, body); // যা আসবে, হুবহু রিসিভ করবে
+    done(null, body); // যা আসবে, হুবহু রিসিভ করবে, কোনো এরর দিবে না
 });
 
 const connectDB = async () => {
@@ -287,7 +287,8 @@ const pollIPRNPendingOrders = async () => {
             // 🔥 BOSS LOGGER: TO SEE WHAT PROVIDER SENDS VIA POLLING 🔥
             console.log(`\n============== [POLLING RAW DATA] ==============`);
             console.log(`📡 Pulled ${messages.length} SMS from Provider API!`);
-            console.log(`Sample Data:`, JSON.stringify(messages[0], null, 2));
+            // নিচের লাইনটি বেশি লগ তৈরি করতে পারে বলে কমেন্ট করা হলো, দরকার হলে অন করতে পারেন
+            // console.log(`Sample Data:`, JSON.stringify(messages[0], null, 2));
             console.log(`================================================\n`);
 
             for (const msg of messages) {
@@ -326,8 +327,8 @@ const pollIPRNPendingOrders = async () => {
     }
 };
 
-// 🛑🛑🛑 BOSS ACTION: POLLING ENGINE OFF FOR WEBHOOK TEST 🛑🛑🛑
-// setInterval(pollIPRNPendingOrders, 4000); 
+// 💥 BOSS ACTION: POLLING ENGINE IS NOW ON 💥
+setInterval(pollIPRNPendingOrders, 4000); 
 
 // 💥 BOSS FIX: GLOBAL WEBHOOK HANDLER (CATCHES EVERYTHING) 💥
 const webhookHandler = async (request, reply) => {
@@ -420,6 +421,7 @@ fastify.get('/v1/numsuccess/info', async (request, reply) => {
     } catch (error) { return reply.status(500).send({ meta: { status: "error" } }); }
 });
 
+// 💥 BOSS UPGRADE: TOP 10 RANGES PER SERVICE WITH EXACT NAMES FOR BOTS 💥
 let cachedActiveData = null;
 let lastFetchTime = 0;
 const CACHE_DURATION = 60 * 1000; 
@@ -447,9 +449,12 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
 
         recentOrders.forEach((o) => {
             let msg = o.fullMessage || o.otp || "";
+            
+            // Getting exact trueService without masking
             let rawService = (o.trueService && o.trueService !== "Unknown" && o.trueService !== "Other") 
                 ? String(o.trueService) 
                 : extractServiceName(msg);
+                
             const exactService = rawService; 
 
             let num = o.searchNumber || o.number || "";
@@ -470,24 +475,35 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
                 const maskedTag = applyMasking(tag, hiddenKeywords); 
 
                 const key = `${rangeStr}|${exactService}|${maskedTag}`;
-                if (!rangeMap[key]) { rangeMap[key] = { range: rangeStr, service: exactService, tag: maskedTag, hits: 0 }; }
+                if (!rangeMap[key]) {
+                    rangeMap[key] = { 
+                        range: rangeStr, 
+                        service: exactService, 
+                        tag: maskedTag, 
+                        hits: 0 
+                    };
+                }
                 rangeMap[key].hits += 1;
             }
         });
 
+        // 💥 Grouping logic: strictly top 10 per service
         const groupedByService = {};
         Object.values(rangeMap).forEach(route => {
-            if (!groupedByService[route.service]) groupedByService[route.service] = [];
+            if (!groupedByService[route.service]) {
+                groupedByService[route.service] = [];
+            }
             groupedByService[route.service].push(route);
         });
 
         const finalFormattedRanges = [];
         for (const serviceName in groupedByService) {
             const sortedRanges = groupedByService[serviceName].sort((a, b) => b.hits - a.hits);
-            finalFormattedRanges.push(...sortedRanges.slice(0, 10)); 
+            finalFormattedRanges.push(...sortedRanges.slice(0, 10)); // exactly top 10 per service
         }
 
         finalFormattedRanges.sort((a, b) => b.hits - a.hits);
+
         cachedActiveData = { active_ranges: finalFormattedRanges };
         lastFetchTime = Date.now();
 
