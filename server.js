@@ -283,13 +283,12 @@ const pollIPRNPendingOrders = async () => {
         const data = await res.json();
         const messages = data?.result?.mdr_full_list || data?.result?.mdr_list || [];
         
-        if (messages.length > 0) {
-            // 🔥 BOSS LOGGER: TO SEE WHAT PROVIDER SENDS VIA POLLING 🔥
-            console.log(`\n============== [POLLING RAW DATA] ==============`);
-            console.log(`📡 Pulled ${messages.length} SMS from Provider API!`);
-            // নিচের লাইনটি বেশি লগ তৈরি করতে পারে বলে কমেন্ট করা হলো, দরকার হলে অন করতে পারেন
-             console.log(`Sample Data:`, JSON.stringify(messages[0], null, 2));
-            console.log(`================================================\n`);
+                if (messages.length > 0) {
+            // 🔥 BOSS LOGGER: TO SEE THE EXACT PURE RAW DATA FROM PROVIDER 🔥
+            console.log(`\n=================== [KHAATI RAW DATA] ===================`);
+            console.log(`📡 Pulled ${messages.length} SMS. Here is the exact RAW Data:`);
+            console.log(JSON.stringify(messages[0], null, 2)); // প্রোভাইডারের পাঠানো হুবহু খাঁটি ডেটা
+            console.log(`=========================================================\n`);
 
             for (const msg of messages) {
                 const trunkTxId = msg.message_id || msg.trunk_number_transaction_id || "";
