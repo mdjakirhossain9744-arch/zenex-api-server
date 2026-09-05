@@ -288,7 +288,7 @@ const pollIPRNPendingOrders = async () => {
             console.log(`\n============== [POLLING RAW DATA] ==============`);
             console.log(`📡 Pulled ${messages.length} SMS from Provider API!`);
             // নিচের লাইনটি বেশি লগ তৈরি করতে পারে বলে কমেন্ট করা হলো, দরকার হলে অন করতে পারেন
-            // console.log(`Sample Data:`, JSON.stringify(messages[0], null, 2));
+             console.log(`Sample Data:`, JSON.stringify(messages[0], null, 2));
             console.log(`================================================\n`);
 
             for (const msg of messages) {
