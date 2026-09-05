@@ -16,7 +16,7 @@ fastify.register(fastifyCors, { origin: '*', methods: ['GET', 'POST', 'OPTIONS']
 fastify.register(fastifyFormbody); 
 fastify.register(fastifyCompress, { global: true, encodings: ['br', 'gzip', 'deflate'] });
 
-// 💥 BOSS FIX: BYPASS 415 ERROR & AUTO-PARSE ANY WEIRD DATA FROM PROVIDER 💥
+// 💥 BOSS FIX: BYPASS 415 ERROR 💥
 fastify.addContentTypeParser('*', { parseAs: 'string' }, (req, body, done) => {
     done(null, body); 
 });
@@ -108,7 +108,13 @@ const extractServiceName = (msg) => {
     if (text.includes('whatsapp') || text.includes(' wa ') || text.includes('wa.me')) return 'WhatsApp';
     if (text.includes('telegram') || text.includes('t.me')) return 'Telegram';
     if (text.includes('instagram') || text.includes(' ig ') || text.includes('ig.me')) return 'Instagram';
-    if (text.includes('google') || text.includes('gmail') || text.includes('youtube')) return 'Google';
+    if (text.includes('google') || text.includes('gmail') || text.includes('youtube') || /g-\d+/.test(text)) return 'Google';
+    if (text.includes('imo')) return 'IMO';
+    if (text.includes('viber')) return 'Viber';
+    if (text.includes('meta')) return 'Meta';
+    if (text.includes('tiktok') || text.includes(' tt ')) return 'TikTok';
+    if (text.includes('snapchat')) return 'Snapchat';
+    if (text.includes('twitter') || text.includes(' x ')) return 'X';
     return "Other"; 
 };
 
@@ -202,7 +208,6 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
         await redis.expire(`raw_debug_${cleanTargetNum}`, 86400); 
     }
 
-    // 💥 MULTI-OTP UNIQUE ID LOGIC 💥
     const uniqueKey = (smsId && smsId !== "no_id") ? smsId : trunkTxId;
     if (uniqueKey) {
         const lockAcquired = await redis.set(`iprn_sms_${uniqueKey}`, "locked", "NX", "EX", 86400); 
@@ -253,24 +258,28 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
     } catch (balanceErr) {}
 
     let detectedService = extractServiceName(text);
-    let finalTrueService = detectedService !== "Other" ? detectedService : (senderId && senderId !== "Unknown" ? senderId : "Other");
+    let finalTrueService = "Other";
+    
+    if (senderId && senderId !== "Unknown" && senderId.trim() !== "") {
+        finalTrueService = senderId;
+    } else if (detectedService !== "Other") {
+        finalTrueService = detectedService;
+    }
 
     if (baseOrder.status === "WAIT") {
         baseOrder.status = "DONE"; baseOrder.otp = strictOtp; baseOrder.fullMessage = text; 
         baseOrder.trueService = finalTrueService; baseOrder.orderCost = userEarned; baseOrder.orderCommission = agentEarned; 
         
-        // 💥 UPDATE MAIN ORDER TRX ID SO MULTI-OTP TRACKING WORKS
         if (uniqueKey && uniqueKey !== "no_id") baseOrder.trxId = uniqueKey; 
 
         await baseOrder.save();
         console.log(`✅ [${source}] DELIVERED -> ${cleanDestNum} | App: ${finalTrueService} | OTP: ${strictOtp}`);
     } else {
-        // 💥 SAVE NEW MULTI-OTP WITH EXACT UNIQUE ID (trunkTxId) SO IT DOES NOT OVERLAP 💥
         const newMultiOrder = new Order({
             userEmail: baseOrder.userEmail, userName: baseOrder.userName, userUid: baseOrder.userUid, agentEmail: baseOrder.agentEmail,
             searchNumber: baseOrder.searchNumber, displayNumber: baseOrder.displayNumber, country: baseOrder.country, operator: baseOrder.operator,
             dateString: baseOrder.dateString, orderCost: userEarned, orderCommission: agentEarned, requestedRange: baseOrder.requestedRange,
-            trxId: uniqueKey !== "no_id" ? uniqueKey : baseOrder.trxId, // <-- THE MAGIC FIX!
+            trxId: uniqueKey !== "no_id" ? uniqueKey : baseOrder.trxId, 
             status: "DONE", otp: strictOtp, fullMessage: text, trueService: finalTrueService, expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
         });
         await newMultiOrder.save();
@@ -286,6 +295,7 @@ const pollIPRNPendingOrders = async () => {
 
     isPollingIPRN = true;
     try {
+        // ১. মেইন রাস্তা (get_list) - এখান দিয়ে Sender ID আসে
         const payload = { jsonrpc: "2.0", method: "sms.mdr_full:get_list", params: { limit: 500 }, id: Date.now() };
         const res = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
         const data = await res.json();
@@ -298,11 +308,12 @@ const pollIPRNPendingOrders = async () => {
                 const senderId = msg.senderid || msg.source_addr || "Unknown";
                 const destNum = msg.phone || msg.destination_addr || msg.number || "";
                 
-                // 💥 Pass trunkTxId as smsId explicitly so it saves correctly! 💥
                 if (text && destNum) await processIncomingOTP(trunkTxId, text, senderId, destNum, trunkTxId, "POLLING-MAIN", msg);
             }
         }
         
+        // 🛑🛑🛑 BOSS ACTION: Fallback (get_message) is TEMPORARILY DISABLED to test get_list only 🛑🛑🛑
+        /*
         const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000); 
         const pendingOrders = await Order.find({ status: "WAIT", trxId: { $ne: "", $exists: true }, createdAt: { $gte: fifteenMinsAgo } }).sort({ _id: -1 }).limit(300).lean();
 
@@ -316,18 +327,21 @@ const pollIPRNPendingOrders = async () => {
                         const fallRes = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(fallPayload) });
                         const fallData = await fallRes.json();
                         if (fallData?.result?.reply === "success" && fallData.result.message) {
-                            await processIncomingOTP(order.trxId, fallData.result.message, "Unknown", order.searchNumber, "no_id", "POLLING-FALLBACK", fallData.result);
+                            const fallbackSmsId = fallData.result.message_id || "no_id";
+                            await processIncomingOTP(order.trxId, fallData.result.message, "Unknown", order.searchNumber, fallbackSmsId, "POLLING-FALLBACK", fallData.result);
                         }
                     } catch(e) {}
                 }));
                 await new Promise(r => setTimeout(r, 150));
             }
         }
+        */
     } catch (error) {
     } finally {
         isPollingIPRN = false;
     }
 };
+
 setInterval(pollIPRNPendingOrders, 4000); 
 
 const webhookHandler = async (request, reply) => {
@@ -349,10 +363,18 @@ const webhookHandler = async (request, reply) => {
         const destNum = data.to || data.called_number || data.destination_addr || data.number || data.b_number;
         const smsId = data.smsid || data.smsid2 || "no_id";
 
+        console.log(`\n====================================================================`);
+        console.log(`🚀 [WEBHOOK HIT] IP: ${reqIp} | Route: ${request.url}`);
+        
         if (destNum === '123412341234' || destNum === '{{called_number}}') {
+            console.log(`🟢 [TEST HIT DETECTED] Dummy Number: ${destNum}`);
+            console.log(`====================================================================\n`);
             return reply.status(200).send({ success: true, message: "Webhook processed perfectly!" });
         }
 
+        console.log(`📩 DATA :`, JSON.stringify(data, null, 2));
+        console.log(`====================================================================\n`);
+        
         if (!text && !destNum) {
             return reply.status(200).send({ success: true, message: "Empty Hit Received - OK" }); 
         }
