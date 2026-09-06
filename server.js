@@ -209,10 +209,6 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
     }
 
     const uniqueKey = (smsId && smsId !== "no_id") ? smsId : trunkTxId;
-    if (uniqueKey) {
-        const lockAcquired = await redis.set(`iprn_sms_${uniqueKey}`, "locked", "NX", "EX", 86400); 
-        if (!lockAcquired) return; 
-    }
     
     let text = rawText.replace(/[<#>]/g, '').replace(/\n/g, ' ').replace(/\r/g, '').replace(/\s{2,}/g, ' ').trim();
     const cleanDestNum = String(destNum).replace('+', '');
@@ -221,8 +217,16 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
     if (cleanDestNum) query.$or.push({ searchNumber: cleanDestNum }, { displayNumber: `+${cleanDestNum}` });
     if (query.$or.length === 0) return;
 
-    const existingOrders = await Order.find(query).sort({ _id: -1 }).limit(5); 
+    const existingOrders = await Order.find(query).sort({ _id: -1 }).limit(15); 
     if (existingOrders.length === 0) return;
+
+    // 💥 CEO'S IRON-CLAD DUPLICATE GUARD 💥
+    // আমরা চেক করছি এই ইউনিক smsId টা ডাটাবেজে আগে থেকেই এই নাম্বারের জন্য সেভ করা আছে কি না!
+    // যদি থাকে, তাহলে কোনোভাবেই ২য় বার সেভ হবে না।
+    const isDuplicate = existingOrders.some(o => o.trxId && String(o.trxId) === String(uniqueKey));
+    if (isDuplicate) {
+        return; 
+    }
 
     let baseOrder = existingOrders.find(o => o.status === "WAIT");
     if (!baseOrder) baseOrder = existingOrders[0]; 
@@ -267,6 +271,7 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
     }
 
     if (baseOrder.status === "WAIT") {
+        // প্রথম ওটিপি সেভ
         baseOrder.status = "DONE"; baseOrder.otp = strictOtp; baseOrder.fullMessage = text; 
         baseOrder.trueService = finalTrueService; baseOrder.orderCost = userEarned; baseOrder.orderCommission = agentEarned; 
         
@@ -275,6 +280,7 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
         await baseOrder.save();
         console.log(`✅ [${source}] DELIVERED -> ${cleanDestNum} | App: ${finalTrueService} | OTP: ${strictOtp}`);
     } else {
+        // ২য়/৩য় মাল্টি-ওটিপির জন্য নতুন সেভ
         const newMultiOrder = new Order({
             userEmail: baseOrder.userEmail, userName: baseOrder.userName, userUid: baseOrder.userUid, agentEmail: baseOrder.agentEmail,
             searchNumber: baseOrder.searchNumber, displayNumber: baseOrder.displayNumber, country: baseOrder.country, operator: baseOrder.operator,
@@ -295,7 +301,7 @@ const pollIPRNPendingOrders = async () => {
 
     isPollingIPRN = true;
     try {
-        // ১. মেইন রাস্তা (get_list)
+        // ১. Main Route Polling
         const payload = { jsonrpc: "2.0", method: "sms.mdr_full:get_list", params: { limit: 500 }, id: Date.now() };
         const res = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
         const data = await res.json();
@@ -312,21 +318,34 @@ const pollIPRNPendingOrders = async () => {
             }
         }
         
-        // 💥 BOSS ACTION: Fallback (get_message) is NOW ACTIVE AGAIN! 💥
+        // 💥 BOSS FIX: 15-Minute Polling for ALL NUMBERS (WAIT & DONE both) to pull Multi-OTP 💥
         const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000); 
-        const pendingOrders = await Order.find({ status: "WAIT", trxId: { $ne: "", $exists: true }, createdAt: { $gte: fifteenMinsAgo } }).sort({ _id: -1 }).limit(300).lean();
+        
+        const rawOrders = await Order.find({ trxId: { $ne: "", $exists: true }, createdAt: { $gte: fifteenMinsAgo } })
+            .select('trxId searchNumber')
+            .sort({ _id: -1 })
+            .lean();
+            
+        const seenTrx = new Set();
+        const recentOrders = [];
+        for (const o of rawOrders) {
+            if (!seenTrx.has(o.trxId)) {
+                seenTrx.add(o.trxId);
+                recentOrders.push(o);
+                if (recentOrders.length >= 300) break; 
+            }
+        }
 
-        if (pendingOrders.length > 0) {
+        if (recentOrders.length > 0) {
             const chunkSize = 10; 
-            for (let i = 0; i < pendingOrders.length; i += chunkSize) {
-                const chunk = pendingOrders.slice(i, i + chunkSize);
+            for (let i = 0; i < recentOrders.length; i += chunkSize) {
+                const chunk = recentOrders.slice(i, i + chunkSize);
                 await Promise.allSettled(chunk.map(async (order) => {
                     try {
                         const fallPayload = { jsonrpc: "2.0", method: "sms.realtime:get_message", params: { message_id: order.trxId }, id: Date.now() };
                         const fallRes = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(fallPayload) });
                         const fallData = await fallRes.json();
                         if (fallData?.result?.reply === "success" && fallData.result.message) {
-                            // 💥 BOSS MULTI-OTP FIX: Fallback থেকেও আসল message_id টা ধরে নিচ্ছি 💥
                             const fallbackSmsId = fallData.result.message_id || "no_id";
                             await processIncomingOTP(order.trxId, fallData.result.message, "Unknown", order.searchNumber, fallbackSmsId, "POLLING-FALLBACK", fallData.result);
                         }
@@ -405,8 +424,6 @@ fastify.get('/v1/check-data', async (request, reply) => {
         return reply.status(500).send({ success: false, message: "Error fetching data" });
     }
 });
-
-// ... [Existing routes /v1/numsuccess/info & /v1/active-ranges remain fully intact below] ...
 
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
     try {
@@ -537,7 +554,7 @@ const startServer = async () => {
         await connectDB();
         await fetchSdeList(); 
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V7 (Direct Webhook Engine + Multi-OTP Guard) is LIVE!`);
+        console.log(`⚡ ZENEX Microservice V8 (Ultimate Multi-OTP Guard + 15M Engine) is LIVE!`);
     } catch (err) { process.exit(1); }
 };
 startServer();
