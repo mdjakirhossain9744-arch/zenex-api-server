@@ -295,7 +295,6 @@ const pollIPRNPendingOrders = async () => {
 
     isPollingIPRN = true;
     try {
-        // ১. মেইন রাস্তা (get_list)
         const payload = { jsonrpc: "2.0", method: "sms.mdr_full:get_list", params: { limit: 500 }, id: Date.now() };
         const res = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
         const data = await res.json();
@@ -312,7 +311,6 @@ const pollIPRNPendingOrders = async () => {
             }
         }
         
-        // 💥 BOSS ACTION: Fallback (get_message) is NOW ACTIVE AGAIN! 💥
         const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000); 
         const pendingOrders = await Order.find({ status: "WAIT", trxId: { $ne: "", $exists: true }, createdAt: { $gte: fifteenMinsAgo } }).sort({ _id: -1 }).limit(300).lean();
 
@@ -326,7 +324,6 @@ const pollIPRNPendingOrders = async () => {
                         const fallRes = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(fallPayload) });
                         const fallData = await fallRes.json();
                         if (fallData?.result?.reply === "success" && fallData.result.message) {
-                            // 💥 BOSS MULTI-OTP FIX: Fallback থেকেও আসল message_id টা ধরে নিচ্ছি 💥
                             const fallbackSmsId = fallData.result.message_id || "no_id";
                             await processIncomingOTP(order.trxId, fallData.result.message, "Unknown", order.searchNumber, fallbackSmsId, "POLLING-FALLBACK", fallData.result);
                         }
@@ -363,24 +360,44 @@ const webhookHandler = async (request, reply) => {
 
         console.log(`\n====================================================================`);
         console.log(`🚀 [WEBHOOK HIT] IP: ${reqIp} | Route: ${request.url}`);
-        
-        if (destNum === '123412341234' || destNum === '{{called_number}}') {
-            console.log(`🟢 [TEST HIT DETECTED] Dummy Number: ${destNum}`);
-            console.log(`====================================================================\n`);
-            return reply.status(200).send({ success: true, message: "Webhook processed perfectly!" });
+        console.log(`📩 DATA :`, JSON.stringify(data, null, 2));
+
+        // 💥 BOSS UPGRADE: ERROR HANDLING FOR PROVIDER 💥
+        if (!data || Object.keys(data).length === 0) {
+            return reply.status(400).send({ success: false, error: "Empty Payload", message: "No data received in body or query." });
+        }
+        if (!destNum && !text) {
+            return reply.status(400).send({ success: false, error: "Missing Parameters", message: "Both Destination Number ('to') and Message text ('message') are missing." });
+        }
+        if (!destNum) {
+            return reply.status(400).send({ success: false, error: "Missing Number Parameter", message: "Destination number parameter ('to' or 'called_number') is missing." });
         }
 
-        console.log(`📩 DATA :`, JSON.stringify(data, null, 2));
-        console.log(`====================================================================\n`);
-        
-        if (!text && !destNum) {
-            return reply.status(200).send({ success: true, message: "Empty Hit Received - OK" }); 
+        // 💥 BOSS UPGRADE: TEST DATA SAVED TO REDIS ONLY (NOT MONGODB) 💥
+        if (destNum === '123412341234' || destNum === '{{called_number}}' || destNum === '123456789') {
+            console.log(`🟢 [TEST HIT DETECTED] Dummy Number: ${destNum}`);
+            
+            const cleanTargetNum = String(destNum).replace(/\D/g, "");
+            const debugLog = {
+                timestamp: new Date().toISOString(),
+                source: "WEBHOOK-TEST",
+                extractedData: { trunkTxId, senderId, smsId, text },
+                raw_payload: data 
+            };
+            await redis.lpush(`raw_debug_${cleanTargetNum}`, JSON.stringify(debugLog));
+            await redis.ltrim(`raw_debug_${cleanTargetNum}`, 0, 19); 
+            await redis.expire(`raw_debug_${cleanTargetNum}`, 86400); 
+
+            console.log(`====================================================================\n`);
+            return reply.status(200).send({ success: true, message: "Webhook Test Hit Received and Saved to Redis /check-data successfully!" });
         }
+        
+        console.log(`====================================================================\n`);
 
         processIncomingOTP(trunkTxId, text, senderId, destNum, smsId, "WEBHOOK", data).catch(console.error);
         return reply.status(200).send({ success: true, message: "Webhook processed perfectly!" });
     } catch (error) { 
-        return reply.status(500).send({ success: false, message: "Internal Error" }); 
+        return reply.status(500).send({ success: false, error: "Internal Error", message: error.message }); 
     }
 };
 
@@ -405,8 +422,6 @@ fastify.get('/v1/check-data', async (request, reply) => {
         return reply.status(500).send({ success: false, message: "Error fetching data" });
     }
 });
-
-// ... [Existing routes /v1/numsuccess/info & /v1/active-ranges remain fully intact below] ...
 
 fastify.get('/v1/numsuccess/info', async (request, reply) => {
     try {
@@ -537,7 +552,7 @@ const startServer = async () => {
         await connectDB();
         await fetchSdeList(); 
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V7 (Direct Webhook Engine + Multi-OTP Guard) is LIVE!`);
+        console.log(`⚡ ZENEX Microservice V7.1 (Webhook Error & Test Data Logging) is LIVE!`);
     } catch (err) { process.exit(1); }
 };
 startServer();
