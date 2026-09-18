@@ -148,8 +148,25 @@ fastify.route({
 
             let response;
             try {
-                const payload = { jsonrpc: "2.0", method: "sms.realtime:allocate", params: { senderid: "OTP", prefix_list: [String(rid).toUpperCase().replace(/X/g, '')], dont_check_access: true }, id: Date.now() };
-                response = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(payload), signal: controller.signal });
+                // 💥 BOSS UPGRADE: TRUNK ID ADDED FOR REALTIME ROUTING 💥
+                const payload = { 
+                    jsonrpc: "2.0", 
+                    method: "sms.realtime:allocate", 
+                    params: { 
+                        target: { "sms.trunk_id": "lJrGEaadQJmbBz6rXmvNrA" }, // Static Trunk ID for Webhook
+                        senderid: "OTP", 
+                        prefix_list: [String(rid).toUpperCase().replace(/X/g, '')], 
+                        dont_check_access: true 
+                    }, 
+                    id: Date.now() 
+                };
+                
+                response = await fetch(IPRN_API_URL, { 
+                    method: "POST", 
+                    headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, 
+                    body: JSON.stringify(payload), 
+                    signal: controller.signal 
+                });
                 clearTimeout(timeoutId);
             } catch (fetchError) {
                 clearTimeout(timeoutId); return reply.status(504).send({ meta: { status: "error" }, message: "Provider is slow. Try again." });
@@ -210,6 +227,7 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
 
     const uniqueKey = (smsId && smsId !== "no_id") ? smsId : trunkTxId;
     if (uniqueKey) {
+        // 💥 BOSS UPGRADE: STRICT DUPLICATE GUARD USING smsId 💥
         const lockAcquired = await redis.set(`iprn_sms_${uniqueKey}`, "locked", "NX", "EX", 86400); 
         if (!lockAcquired) return; 
     }
@@ -275,6 +293,7 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
         await baseOrder.save();
         console.log(`✅ [${source}] DELIVERED -> ${cleanDestNum} | App: ${finalTrueService} | OTP: ${strictOtp}`);
     } else {
+        // 💥 BOSS UPGRADE: MULTI-OTP SAVED AS COMPLETELY NEW DOCUMENT (No _||_) 💥
         const newMultiOrder = new Order({
             userEmail: baseOrder.userEmail, userName: baseOrder.userName, userUid: baseOrder.userUid, agentEmail: baseOrder.agentEmail,
             searchNumber: baseOrder.searchNumber, displayNumber: baseOrder.displayNumber, country: baseOrder.country, operator: baseOrder.operator,
@@ -287,57 +306,7 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
     }
 };
 
-let isPollingIPRN = false;
-const pollIPRNPendingOrders = async () => {
-    if (isPollingIPRN) return;
-    const lockAcquired = await redis.set("iprn_poll_lock", "locked", "NX", "EX", 3);
-    if (!lockAcquired) return; 
-
-    isPollingIPRN = true;
-    try {
-        const payload = { jsonrpc: "2.0", method: "sms.mdr_full:get_list", params: { limit: 500 }, id: Date.now() };
-        const res = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-        const data = await res.json();
-        const messages = data?.result?.mdr_full_list || data?.result?.mdr_list || [];
-        
-        if (messages.length > 0) {
-            for (const msg of messages) {
-                const trunkTxId = msg.message_id || msg.trunk_number_transaction_id || "";
-                const text = msg.message || msg.text || msg.content || "";
-                const senderId = msg.senderid || msg.source_addr || "Unknown";
-                const destNum = msg.phone || msg.destination_addr || msg.number || "";
-                
-                if (text && destNum) await processIncomingOTP(trunkTxId, text, senderId, destNum, trunkTxId, "POLLING-MAIN", msg);
-            }
-        }
-        
-        const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000); 
-        const pendingOrders = await Order.find({ status: "WAIT", trxId: { $ne: "", $exists: true }, createdAt: { $gte: fifteenMinsAgo } }).sort({ _id: -1 }).limit(300).lean();
-
-        if (pendingOrders.length > 0) {
-            const chunkSize = 10; 
-            for (let i = 0; i < pendingOrders.length; i += chunkSize) {
-                const chunk = pendingOrders.slice(i, i + chunkSize);
-                await Promise.allSettled(chunk.map(async (order) => {
-                    try {
-                        const fallPayload = { jsonrpc: "2.0", method: "sms.realtime:get_message", params: { message_id: order.trxId }, id: Date.now() };
-                        const fallRes = await fetch(IPRN_API_URL, { method: "POST", headers: { "Api-Key": IPRN_API_KEY, "Content-Type": "application/json" }, body: JSON.stringify(fallPayload) });
-                        const fallData = await fallRes.json();
-                        if (fallData?.result?.reply === "success" && fallData.result.message) {
-                            const fallbackSmsId = fallData.result.message_id || "no_id";
-                            await processIncomingOTP(order.trxId, fallData.result.message, "Unknown", order.searchNumber, fallbackSmsId, "POLLING-FALLBACK", fallData.result);
-                        }
-                    } catch(e) {}
-                }));
-                await new Promise(r => setTimeout(r, 150));
-            }
-        }
-    } catch (error) {
-    } finally {
-        isPollingIPRN = false;
-    }
-};
-setInterval(pollIPRNPendingOrders, 4000); 
+// 💥 BOSS UPGRADE: POLLING COMPLETELY DELETED! WE ONLY RELY ON WEBHOOK 💥
 
 const webhookHandler = async (request, reply) => {
     try {
@@ -362,7 +331,6 @@ const webhookHandler = async (request, reply) => {
         console.log(`🚀 [WEBHOOK HIT] IP: ${reqIp} | Route: ${request.url}`);
         console.log(`📩 DATA :`, JSON.stringify(data, null, 2));
 
-        // 💥 BOSS UPGRADE: ERROR HANDLING FOR PROVIDER 💥
         if (!data || Object.keys(data).length === 0) {
             return reply.status(400).send({ success: false, error: "Empty Payload", message: "No data received in body or query." });
         }
@@ -552,7 +520,7 @@ const startServer = async () => {
         await connectDB();
         await fetchSdeList(); 
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V7.1 (Webhook Error & Test Data Logging) is LIVE!`);
+        console.log(`⚡ ZENEX Microservice V8.0 (Trunk ID Routing & Realtime Webhook Mode) is LIVE!`);
     } catch (err) { process.exit(1); }
 };
 startServer();
