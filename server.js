@@ -284,6 +284,16 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
         finalTrueService = detectedService;
     }
 
+    // 💥 THE BOSS OVERRIDE: ROOT LEVEL FIX FOR META (INSTAGRAM/WHATSAPP) 💥
+    if (finalTrueService.toUpperCase() === "FACEBOOK" || finalTrueService.toUpperCase() === "META") {
+        const lowerText = text.toLowerCase();
+        if (lowerText.includes("instagram") || lowerText.includes(" ig ")) {
+            finalTrueService = "INSTAGRAM"; // ডাটাবেসে সরাসরি INSTAGRAM সেভ হবে
+        } else if (lowerText.includes("whatsapp") || lowerText.includes(" wa ")) {
+            finalTrueService = "WHATSAPP"; // ডাটাবেসে সরাসরি WHATSAPP সেভ হবে
+        }
+    }
+
     if (baseOrder.status === "WAIT") {
         baseOrder.status = "DONE"; baseOrder.otp = strictOtp; baseOrder.fullMessage = text; 
         baseOrder.trueService = finalTrueService; baseOrder.orderCost = userEarned; baseOrder.orderCommission = agentEarned; 
@@ -520,7 +530,7 @@ const startServer = async () => {
         await connectDB();
         await fetchSdeList(); 
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V8.0 (Trunk ID Routing & Realtime Webhook Mode) is LIVE!`);
+        console.log(`⚡ ZENEX Microservice V8.2 (Root Level Meta Fix & Trunk ID Routing) is LIVE!`);
     } catch (err) { process.exit(1); }
 };
 startServer();
