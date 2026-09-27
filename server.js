@@ -502,7 +502,11 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
             let rawService = (o.trueService && o.trueService !== "Unknown" && o.trueService !== "Other") 
                 ? String(o.trueService) 
                 : extractServiceName(msg);
-            const exactService = rawService; 
+            
+            let exactService = rawService; 
+
+            // 💥 THE BOSS MASKING FIX FOR SERVICE NAMES 💥
+            exactService = applyMasking(exactService, hiddenKeywords);
 
             let num = o.searchNumber || o.number || "";
             num = String(num).replace("+", "");
@@ -558,7 +562,7 @@ const startServer = async () => {
         await connectDB();
         await fetchSdeList(); 
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V8.3 (Race Condition Fix Included) is LIVE!`);
+        console.log(`⚡ ZENEX Microservice V8.4 (Race Condition & Active Range Masking Fix) is LIVE!`);
     } catch (err) { process.exit(1); }
 };
 startServer();
