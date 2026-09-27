@@ -288,20 +288,48 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
     if (finalTrueService.toUpperCase() === "FACEBOOK" || finalTrueService.toUpperCase() === "META") {
         const lowerText = text.toLowerCase();
         if (lowerText.includes("instagram") || lowerText.includes(" ig ")) {
-            finalTrueService = "INSTAGRAM"; // ডাটাবেসে সরাসরি INSTAGRAM সেভ হবে
+            finalTrueService = "INSTAGRAM"; 
         } else if (lowerText.includes("whatsapp") || lowerText.includes(" wa ")) {
-            finalTrueService = "WHATSAPP"; // ডাটাবেসে সরাসরি WHATSAPP সেভ হবে
+            finalTrueService = "WHATSAPP"; 
         }
     }
 
+    // ==========================================
+    // 💥 RACE CONDITION FIX: STOP OVERWRITING 💥
+    // ==========================================
     if (baseOrder.status === "WAIT") {
-        baseOrder.status = "DONE"; baseOrder.otp = strictOtp; baseOrder.fullMessage = text; 
-        baseOrder.trueService = finalTrueService; baseOrder.orderCost = userEarned; baseOrder.orderCommission = agentEarned; 
-        
-        if (uniqueKey && uniqueKey !== "no_id") baseOrder.trxId = uniqueKey; 
+        // Atomic Update: শুধুমাত্র WAIT থাকলেই ডাটা ঢুকবে, না হলে null রিটার্ন করবে (ওভাররাইট হবে না)
+        const updatedOrder = await Order.findOneAndUpdate(
+            { _id: baseOrder._id, status: "WAIT" },
+            { 
+                $set: { 
+                    status: "DONE", 
+                    otp: strictOtp, 
+                    fullMessage: text, 
+                    trueService: finalTrueService, 
+                    orderCost: userEarned, 
+                    orderCommission: agentEarned,
+                    trxId: (uniqueKey && uniqueKey !== "no_id") ? uniqueKey : baseOrder.trxId
+                } 
+            },
+            { new: true }
+        );
 
-        await baseOrder.save();
-        console.log(`✅ [${source}] DELIVERED -> ${cleanDestNum} | App: ${finalTrueService} | OTP: ${strictOtp}`);
+        if (updatedOrder) {
+            console.log(`✅ [${source}] DELIVERED -> ${cleanDestNum} | App: ${finalTrueService} | OTP: ${strictOtp}`);
+        } else {
+            // যদি updatedOrder 'null' হয়, তার মানে হলো আগের মিলি-সেকেন্ডে অন্য মেসেজ এটাকে DONE করে দিয়েছে!
+            // তাই এখন ওভাররাইট না করে, এটাকে Multi-OTP হিসেবে নতুন ফাইলে সেভ করবে।
+            const newMultiOrder = new Order({
+                userEmail: baseOrder.userEmail, userName: baseOrder.userName, userUid: baseOrder.userUid, agentEmail: baseOrder.agentEmail,
+                searchNumber: baseOrder.searchNumber, displayNumber: baseOrder.displayNumber, country: baseOrder.country, operator: baseOrder.operator,
+                dateString: baseOrder.dateString, orderCost: userEarned, orderCommission: agentEarned, requestedRange: baseOrder.requestedRange,
+                trxId: uniqueKey !== "no_id" ? uniqueKey : baseOrder.trxId, 
+                status: "DONE", otp: strictOtp, fullMessage: text, trueService: finalTrueService, expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
+            });
+            await newMultiOrder.save();
+            console.log(`✅ [${source}] CONCURRENT MULTI-DELIVERED -> ${cleanDestNum} | App: ${finalTrueService} | OTP: ${strictOtp}`);
+        }
     } else {
         // 💥 BOSS UPGRADE: MULTI-OTP SAVED AS COMPLETELY NEW DOCUMENT (No _||_) 💥
         const newMultiOrder = new Order({
@@ -530,7 +558,7 @@ const startServer = async () => {
         await connectDB();
         await fetchSdeList(); 
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V8.2 (Root Level Meta Fix & Trunk ID Routing) is LIVE!`);
+        console.log(`⚡ ZENEX Microservice V8.3 (Race Condition Fix Included) is LIVE!`);
     } catch (err) { process.exit(1); }
 };
 startServer();
