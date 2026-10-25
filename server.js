@@ -49,6 +49,9 @@ const apiAuthCache = new Map();
 const globalWorkerUserCache = new Map(); 
 const userOtpResponseCache = new Map(); 
 
+// 💥 BOSS UPGRADE: SSE ACTIVE CLIENTS MAP FOR REAL-TIME PUSH 💥
+const activeClients = new Map(); 
+
 let cachedMaskingSettings = { keywords: [], expiry: 0 };
 async function getMaskingKeywords() {
     if (Date.now() < cachedMaskingSettings.expiry) return cachedMaskingSettings.keywords;
@@ -116,6 +119,18 @@ const extractServiceName = (msg) => {
     if (text.includes('snapchat')) return 'Snapchat';
     if (text.includes('twitter') || text.includes(' x ')) return 'X';
     return "Other"; 
+};
+
+// 💥 BOSS UPGRADE: HELPER TO PUSH OTP TO FRONTEND 💥
+const sendSSEUpdate = (email, searchNumber, otp, fullMessage, isMulti) => {
+    if (!email) return;
+    const clients = activeClients.get(email);
+    if (clients && clients.size > 0) {
+        const payload = JSON.stringify({ searchNumber, otp, fullMessage, isMulti });
+        clients.forEach(client => {
+            try { client.write(`data: ${payload}\n\n`); } catch(e) {}
+        });
+    }
 };
 
 fastify.route({
@@ -316,6 +331,7 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
         );
 
         if (updatedOrder) {
+            sendSSEUpdate(baseOrder.userEmail, cleanDestNum, strictOtp, text, false); // 💥 BOSS PUSH 💥
             console.log(`✅ [${source}] DELIVERED -> ${cleanDestNum} | App: ${finalTrueService} | OTP: ${strictOtp}`);
         } else {
             // যদি updatedOrder 'null' হয়, তার মানে হলো আগের মিলি-সেকেন্ডে অন্য মেসেজ এটাকে DONE করে দিয়েছে!
@@ -328,6 +344,7 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
                 status: "DONE", otp: strictOtp, fullMessage: text, trueService: finalTrueService, expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
             });
             await newMultiOrder.save();
+            sendSSEUpdate(baseOrder.userEmail, cleanDestNum, strictOtp, text, true); // 💥 BOSS PUSH 💥
             console.log(`✅ [${source}] CONCURRENT MULTI-DELIVERED -> ${cleanDestNum} | App: ${finalTrueService} | OTP: ${strictOtp}`);
         }
     } else {
@@ -340,6 +357,7 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
             status: "DONE", otp: strictOtp, fullMessage: text, trueService: finalTrueService, expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
         });
         await newMultiOrder.save();
+        sendSSEUpdate(baseOrder.userEmail, cleanDestNum, strictOtp, text, true); // 💥 BOSS PUSH 💥
         console.log(`✅ [${source}] MULTI-DELIVERED -> ${cleanDestNum} | App: ${finalTrueService} | OTP: ${strictOtp}`);
     }
 };
@@ -409,6 +427,30 @@ const webhookHandler = async (request, reply) => {
 
 fastify.route({ method: ['GET', 'POST'], url: '/v1/webhook/iprn-receive', handler: webhookHandler });
 fastify.route({ method: ['GET', 'POST'], url: '/v1/webhook/ipm-receive', handler: webhookHandler });
+
+// 💥 BOSS UPGRADE: NEW ROUTE TO PUSH DATA DIRECTLY TO FRONTEND SCREEN 💥
+fastify.get('/v1/stream-otp', (request, reply) => {
+    const email = request.query.email;
+    if (!email) return reply.status(400).send({ error: "Email missing" });
+
+    reply.raw.setHeader('Content-Type', 'text/event-stream');
+    reply.raw.setHeader('Cache-Control', 'no-cache');
+    reply.raw.setHeader('Connection', 'keep-alive');
+    reply.raw.setHeader('Access-Control-Allow-Origin', '*');
+
+    reply.raw.write(`data: ${JSON.stringify({ status: "connected" })}\n\n`);
+
+    if (!activeClients.has(email)) activeClients.set(email, new Set());
+    activeClients.get(email).add(reply.raw);
+
+    request.raw.on('close', () => {
+        const clients = activeClients.get(email);
+        if (clients) {
+            clients.delete(reply.raw);
+            if (clients.size === 0) activeClients.delete(email);
+        }
+    });
+});
 
 fastify.get('/v1/check-data', async (request, reply) => {
     try {
@@ -562,7 +604,7 @@ const startServer = async () => {
         await connectDB();
         await fetchSdeList(); 
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V8.4 (Race Condition & Active Range Masking Fix) is LIVE!`);
+        console.log(`⚡ ZENEX Microservice V8.4 (SSE Push & 100% CPU Fix) is LIVE!`);
     } catch (err) { process.exit(1); }
 };
 startServer();
