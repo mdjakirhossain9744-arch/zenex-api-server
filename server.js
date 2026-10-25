@@ -16,7 +16,6 @@ fastify.register(fastifyCors, { origin: '*', methods: ['GET', 'POST', 'OPTIONS']
 fastify.register(fastifyFormbody); 
 fastify.register(fastifyCompress, { global: true, encodings: ['br', 'gzip', 'deflate'] });
 
-// 💥 BOSS FIX: BYPASS 415 ERROR 💥
 fastify.addContentTypeParser('*', { parseAs: 'string' }, (req, body, done) => {
     done(null, body); 
 });
@@ -49,7 +48,6 @@ const apiAuthCache = new Map();
 const globalWorkerUserCache = new Map(); 
 const userOtpResponseCache = new Map(); 
 
-// 💥 BOSS UPGRADE: SSE ACTIVE CLIENTS MAP FOR REAL-TIME PUSH 💥
 const activeClients = new Map(); 
 
 let cachedMaskingSettings = { keywords: [], expiry: 0 };
@@ -121,7 +119,7 @@ const extractServiceName = (msg) => {
     return "Other"; 
 };
 
-// 💥 BOSS UPGRADE: HELPER TO PUSH OTP TO FRONTEND 💥
+// 💥 THE BOSS PUSHER (Sends data directly to React UI) 💥
 const sendSSEUpdate = (email, searchNumber, otp, fullMessage, isMulti) => {
     if (!email) return;
     const clients = activeClients.get(email);
@@ -163,12 +161,11 @@ fastify.route({
 
             let response;
             try {
-                // 💥 BOSS UPGRADE: TRUNK ID ADDED FOR REALTIME ROUTING 💥
                 const payload = { 
                     jsonrpc: "2.0", 
                     method: "sms.realtime:allocate", 
                     params: { 
-                        target: { "sms.trunk_id": "lJrGEaadQJmbBz6rXmvNrA" }, // Static Trunk ID for Webhook
+                        target: { "sms.trunk_id": "lJrGEaadQJmbBz6rXmvNrA" }, 
                         senderid: "OTP", 
                         prefix_list: [String(rid).toUpperCase().replace(/X/g, '')], 
                         dont_check_access: true 
@@ -260,7 +257,12 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
     if (!baseOrder) baseOrder = existingOrders[0]; 
 
     const orderAgeInMs = Date.now() - new Date(baseOrder.createdAt).getTime();
-    if (orderAgeInMs > 25 * 60 * 1000 || baseOrder.status === "FAIL" || baseOrder.status === "CANCEL") return;
+    const STRICT_20_MINS = 20 * 60 * 1000; 
+
+    if (orderAgeInMs > STRICT_20_MINS || baseOrder.status === "FAIL" || baseOrder.status === "CANCEL") {
+        console.log(`⏳ [EXPIRED] OTP arrived after 20 mins for ${cleanDestNum}. Strictly Dropped!`);
+        return; 
+    }
     
     const strictOtp = extractStrictOTP(text);
 
@@ -307,9 +309,6 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
         }
     }
 
-    // ==========================================
-    // 💥 Mongoose Warning Fixed: { returnDocument: 'after' } 💥
-    // ==========================================
     if (baseOrder.status === "WAIT") {
         const updatedOrder = await Order.findOneAndUpdate(
             { _id: baseOrder._id, status: "WAIT" },
@@ -324,7 +323,7 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
                     trxId: (uniqueKey && uniqueKey !== "no_id") ? uniqueKey : baseOrder.trxId
                 } 
             },
-            { returnDocument: 'after' } // 💥 Fixed the Mongoose warning!
+            { returnDocument: 'after' } 
         );
 
         if (updatedOrder) {
@@ -375,10 +374,6 @@ const webhookHandler = async (request, reply) => {
         const destNum = data.to || data.called_number || data.destination_addr || data.number || data.b_number;
         const smsId = data.smsid || data.smsid2 || "no_id";
 
-        console.log(`\n====================================================================`);
-        console.log(`🚀 [WEBHOOK HIT] IP: ${reqIp} | Route: ${request.url}`);
-        console.log(`📩 DATA :`, JSON.stringify(data, null, 2));
-
         if (!data || Object.keys(data).length === 0) {
             return reply.status(400).send({ success: false, error: "Empty Payload", message: "No data received in body or query." });
         }
@@ -390,7 +385,6 @@ const webhookHandler = async (request, reply) => {
         }
 
         if (destNum === '123412341234' || destNum === '{{called_number}}' || destNum === '123456789') {
-            console.log(`🟢 [TEST HIT DETECTED] Dummy Number: ${destNum}`);
             const cleanTargetNum = String(destNum).replace(/\D/g, "");
             const debugLog = {
                 timestamp: new Date().toISOString(),
@@ -401,13 +395,9 @@ const webhookHandler = async (request, reply) => {
             await redis.lpush(`raw_debug_${cleanTargetNum}`, JSON.stringify(debugLog));
             await redis.ltrim(`raw_debug_${cleanTargetNum}`, 0, 19); 
             await redis.expire(`raw_debug_${cleanTargetNum}`, 86400); 
-
-            console.log(`====================================================================\n`);
             return reply.status(200).send({ success: true, message: "Webhook Test Hit Received and Saved to Redis /check-data successfully!" });
         }
         
-        console.log(`====================================================================\n`);
-
         processIncomingOTP(trunkTxId, text, senderId, destNum, smsId, "WEBHOOK", data).catch(console.error);
         return reply.status(200).send({ success: true, message: "Webhook processed perfectly!" });
     } catch (error) { 
@@ -418,9 +408,6 @@ const webhookHandler = async (request, reply) => {
 fastify.route({ method: ['GET', 'POST'], url: '/v1/webhook/iprn-receive', handler: webhookHandler });
 fastify.route({ method: ['GET', 'POST'], url: '/v1/webhook/ipm-receive', handler: webhookHandler });
 
-// ==========================================
-// 💥 BOSS UPGRADE: NGINX BUFFER BYPASS & HEARTBEAT FOR SSE 💥
-// ==========================================
 fastify.get('/v1/stream-otp', (request, reply) => {
     const email = request.query.email;
     if (!email) return reply.status(400).send({ error: "Email missing" });
@@ -429,14 +416,13 @@ fastify.get('/v1/stream-otp', (request, reply) => {
     reply.raw.setHeader('Cache-Control', 'no-cache');
     reply.raw.setHeader('Connection', 'keep-alive');
     reply.raw.setHeader('Access-Control-Allow-Origin', '*');
-    reply.raw.setHeader('X-Accel-Buffering', 'no'); // 💥 THIS FIXES NGINX BLOCKING REAL-TIME DATA! 💥
+    reply.raw.setHeader('X-Accel-Buffering', 'no'); 
 
     reply.raw.write(`data: ${JSON.stringify({ status: "connected" })}\n\n`);
 
     if (!activeClients.has(email)) activeClients.set(email, new Set());
     activeClients.get(email).add(reply.raw);
 
-    // 💥 Heartbeat to keep connection alive in Next.js/Browser
     const heartbeat = setInterval(() => {
         if (!reply.raw.writableEnded) {
             reply.raw.write(': keep-alive\n\n');
@@ -453,18 +439,14 @@ fastify.get('/v1/stream-otp', (request, reply) => {
     });
 });
 
+// ... (Other fastify routes remain identical) ...
 fastify.get('/v1/check-data', async (request, reply) => {
     try {
         const num = request.query.number;
         if (!num) return reply.send({ success: false, message: "Please provide a number parameter. Example: ?number=123456" });
-        
         const cleanNum = String(num).replace(/\D/g, "");
         const logs = await redis.lrange(`raw_debug_${cleanNum}`, 0, -1);
-        
-        if (logs.length === 0) {
-            return reply.send({ success: true, number: cleanNum, message: "No data received yet for this number." });
-        }
-
+        if (logs.length === 0) return reply.send({ success: true, number: cleanNum, message: "No data received yet for this number." });
         const parsedLogs = logs.map(log => JSON.parse(log));
         return reply.send({ success: true, number: cleanNum, total_records: parsedLogs.length, logs: parsedLogs });
     } catch (error) {
@@ -522,32 +504,21 @@ const CACHE_DURATION = 60 * 1000;
 fastify.get('/v1/active-ranges', async (request, reply) => {
     try {
         const apiKey = request.headers['mapikey'] || (request.query && request.query.mapikey);
-        if (!apiKey || apiKey.trim().length < 10) {
-            return reply.status(401).send({ success: false, message: "Invalid API Key" });
-        }
+        if (!apiKey || apiKey.trim().length < 10) return reply.status(401).send({ success: false, message: "Invalid API Key" });
 
-        if (cachedActiveData && (Date.now() - lastFetchTime < CACHE_DURATION)) {
-            return reply.send({ success: true, cached: true, message: "Global routing ranges fetched", data: cachedActiveData });
-        }
+        if (cachedActiveData && (Date.now() - lastFetchTime < CACHE_DURATION)) return reply.send({ success: true, cached: true, message: "Global routing ranges fetched", data: cachedActiveData });
 
         const hiddenKeywords = await getMaskingKeywords();
         const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
         
-        const recentOrders = await Order.find({ 
-            status: { $in: ["DONE", "Success", "SUCCESS"] }, 
-            updatedAt: { $gte: oneHourAgo } 
-        }).select("fullMessage otp searchNumber number trueService").lean();
+        const recentOrders = await Order.find({ status: { $in: ["DONE", "Success", "SUCCESS"] }, updatedAt: { $gte: oneHourAgo } }).select("fullMessage otp searchNumber number trueService").lean();
         
         const rangeMap = {};
 
         recentOrders.forEach((o) => {
             let msg = o.fullMessage || o.otp || "";
-            let rawService = (o.trueService && o.trueService !== "Unknown" && o.trueService !== "Other") 
-                ? String(o.trueService) 
-                : extractServiceName(msg);
-            
-            let exactService = rawService; 
-            exactService = applyMasking(exactService, hiddenKeywords);
+            let rawService = (o.trueService && o.trueService !== "Unknown" && o.trueService !== "Other") ? String(o.trueService) : extractServiceName(msg);
+            let exactService = applyMasking(rawService, hiddenKeywords);
 
             let num = o.searchNumber || o.number || "";
             num = String(num).replace("+", "");
@@ -598,12 +569,45 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
 
 fastify.get('/v1/user/today-otps', async (request, reply) => reply.type('text/plain').send("NO_DATA"));
 
+// =========================================================================
+// 💥 BOSS UPGRADE: CRON JOB THAT ACTS LIKE A WEBHOOK FOR TIMEOUTS! 💥
+// =========================================================================
+setInterval(async () => {
+    try {
+        const exact20MinsAgo = new Date(Date.now() - 20 * 60 * 1000); 
+        
+        // Find all orders that have crossed 20 minutes
+        const expiredOrders = await Order.find({ 
+            status: "WAIT", 
+            createdAt: { $lt: exact20MinsAgo } 
+        });
+
+        if (expiredOrders.length > 0) {
+            for (const order of expiredOrders) {
+                // Update in DB
+                order.status = "FAIL";
+                order.otp = "Timeout";
+                order.fullMessage = "Time expired";
+                await order.save();
+
+                // 💥 FIRE SSE PUSH JUST LIKE A WEBHOOK 💥
+                sendSSEUpdate(order.userEmail, order.searchNumber, 'Timeout', 'Time expired', false);
+            }
+            
+            console.log(`🧹 [CRON JOB] Pushed 'Timeout' event to ${expiredOrders.length} expired numbers.`);
+        }
+    } catch (err) {
+        console.error("❌ [CRON ERROR]:", err.message);
+    }
+}, 60 * 1000); // Runs exactly every 1 minute
+
+
 const startServer = async () => {
     try {
         await connectDB();
         await fetchSdeList(); 
         await fastify.listen({ port: process.env.PORT || 4000, host: '0.0.0.0' });
-        console.log(`⚡ ZENEX Microservice V8.4 (SSE Push & 100% CPU Fix) is LIVE!`);
+        console.log(`⚡ ZENEX Microservice V8.4 (Webhook Timeout Push Enabled) is LIVE!`);
     } catch (err) { process.exit(1); }
 };
 startServer();
