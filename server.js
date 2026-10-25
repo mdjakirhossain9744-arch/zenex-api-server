@@ -242,7 +242,6 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
 
     const uniqueKey = (smsId && smsId !== "no_id") ? smsId : trunkTxId;
     if (uniqueKey) {
-        // 💥 BOSS UPGRADE: STRICT DUPLICATE GUARD USING smsId 💥
         const lockAcquired = await redis.set(`iprn_sms_${uniqueKey}`, "locked", "NX", "EX", 86400); 
         if (!lockAcquired) return; 
     }
@@ -299,7 +298,6 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
         finalTrueService = detectedService;
     }
 
-    // 💥 THE BOSS OVERRIDE: ROOT LEVEL FIX FOR META (INSTAGRAM/WHATSAPP) 💥
     if (finalTrueService.toUpperCase() === "FACEBOOK" || finalTrueService.toUpperCase() === "META") {
         const lowerText = text.toLowerCase();
         if (lowerText.includes("instagram") || lowerText.includes(" ig ")) {
@@ -310,10 +308,9 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
     }
 
     // ==========================================
-    // 💥 RACE CONDITION FIX: STOP OVERWRITING 💥
+    // 💥 Mongoose Warning Fixed: { returnDocument: 'after' } 💥
     // ==========================================
     if (baseOrder.status === "WAIT") {
-        // Atomic Update: শুধুমাত্র WAIT থাকলেই ডাটা ঢুকবে, না হলে null রিটার্ন করবে (ওভাররাইট হবে না)
         const updatedOrder = await Order.findOneAndUpdate(
             { _id: baseOrder._id, status: "WAIT" },
             { 
@@ -327,15 +324,13 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
                     trxId: (uniqueKey && uniqueKey !== "no_id") ? uniqueKey : baseOrder.trxId
                 } 
             },
-            { new: true }
+            { returnDocument: 'after' } // 💥 Fixed the Mongoose warning!
         );
 
         if (updatedOrder) {
-            sendSSEUpdate(baseOrder.userEmail, cleanDestNum, strictOtp, text, false); // 💥 BOSS PUSH 💥
+            sendSSEUpdate(baseOrder.userEmail, cleanDestNum, strictOtp, text, false); 
             console.log(`✅ [${source}] DELIVERED -> ${cleanDestNum} | App: ${finalTrueService} | OTP: ${strictOtp}`);
         } else {
-            // যদি updatedOrder 'null' হয়, তার মানে হলো আগের মিলি-সেকেন্ডে অন্য মেসেজ এটাকে DONE করে দিয়েছে!
-            // তাই এখন ওভাররাইট না করে, এটাকে Multi-OTP হিসেবে নতুন ফাইলে সেভ করবে।
             const newMultiOrder = new Order({
                 userEmail: baseOrder.userEmail, userName: baseOrder.userName, userUid: baseOrder.userUid, agentEmail: baseOrder.agentEmail,
                 searchNumber: baseOrder.searchNumber, displayNumber: baseOrder.displayNumber, country: baseOrder.country, operator: baseOrder.operator,
@@ -344,11 +339,10 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
                 status: "DONE", otp: strictOtp, fullMessage: text, trueService: finalTrueService, expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
             });
             await newMultiOrder.save();
-            sendSSEUpdate(baseOrder.userEmail, cleanDestNum, strictOtp, text, true); // 💥 BOSS PUSH 💥
+            sendSSEUpdate(baseOrder.userEmail, cleanDestNum, strictOtp, text, true); 
             console.log(`✅ [${source}] CONCURRENT MULTI-DELIVERED -> ${cleanDestNum} | App: ${finalTrueService} | OTP: ${strictOtp}`);
         }
     } else {
-        // 💥 BOSS UPGRADE: MULTI-OTP SAVED AS COMPLETELY NEW DOCUMENT (No _||_) 💥
         const newMultiOrder = new Order({
             userEmail: baseOrder.userEmail, userName: baseOrder.userName, userUid: baseOrder.userUid, agentEmail: baseOrder.agentEmail,
             searchNumber: baseOrder.searchNumber, displayNumber: baseOrder.displayNumber, country: baseOrder.country, operator: baseOrder.operator,
@@ -357,12 +351,10 @@ const processIncomingOTP = async (trunkTxId, rawText, senderId, destNum, smsId, 
             status: "DONE", otp: strictOtp, fullMessage: text, trueService: finalTrueService, expireAt: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000)
         });
         await newMultiOrder.save();
-        sendSSEUpdate(baseOrder.userEmail, cleanDestNum, strictOtp, text, true); // 💥 BOSS PUSH 💥
+        sendSSEUpdate(baseOrder.userEmail, cleanDestNum, strictOtp, text, true); 
         console.log(`✅ [${source}] MULTI-DELIVERED -> ${cleanDestNum} | App: ${finalTrueService} | OTP: ${strictOtp}`);
     }
 };
-
-// 💥 BOSS UPGRADE: POLLING COMPLETELY DELETED! WE ONLY RELY ON WEBHOOK 💥
 
 const webhookHandler = async (request, reply) => {
     try {
@@ -397,10 +389,8 @@ const webhookHandler = async (request, reply) => {
             return reply.status(400).send({ success: false, error: "Missing Number Parameter", message: "Destination number parameter ('to' or 'called_number') is missing." });
         }
 
-        // 💥 BOSS UPGRADE: TEST DATA SAVED TO REDIS ONLY (NOT MONGODB) 💥
         if (destNum === '123412341234' || destNum === '{{called_number}}' || destNum === '123456789') {
             console.log(`🟢 [TEST HIT DETECTED] Dummy Number: ${destNum}`);
-            
             const cleanTargetNum = String(destNum).replace(/\D/g, "");
             const debugLog = {
                 timestamp: new Date().toISOString(),
@@ -428,7 +418,9 @@ const webhookHandler = async (request, reply) => {
 fastify.route({ method: ['GET', 'POST'], url: '/v1/webhook/iprn-receive', handler: webhookHandler });
 fastify.route({ method: ['GET', 'POST'], url: '/v1/webhook/ipm-receive', handler: webhookHandler });
 
-// 💥 BOSS UPGRADE: NEW ROUTE TO PUSH DATA DIRECTLY TO FRONTEND SCREEN 💥
+// ==========================================
+// 💥 BOSS UPGRADE: NGINX BUFFER BYPASS & HEARTBEAT FOR SSE 💥
+// ==========================================
 fastify.get('/v1/stream-otp', (request, reply) => {
     const email = request.query.email;
     if (!email) return reply.status(400).send({ error: "Email missing" });
@@ -437,13 +429,22 @@ fastify.get('/v1/stream-otp', (request, reply) => {
     reply.raw.setHeader('Cache-Control', 'no-cache');
     reply.raw.setHeader('Connection', 'keep-alive');
     reply.raw.setHeader('Access-Control-Allow-Origin', '*');
+    reply.raw.setHeader('X-Accel-Buffering', 'no'); // 💥 THIS FIXES NGINX BLOCKING REAL-TIME DATA! 💥
 
     reply.raw.write(`data: ${JSON.stringify({ status: "connected" })}\n\n`);
 
     if (!activeClients.has(email)) activeClients.set(email, new Set());
     activeClients.get(email).add(reply.raw);
 
+    // 💥 Heartbeat to keep connection alive in Next.js/Browser
+    const heartbeat = setInterval(() => {
+        if (!reply.raw.writableEnded) {
+            reply.raw.write(': keep-alive\n\n');
+        }
+    }, 15000);
+
     request.raw.on('close', () => {
+        clearInterval(heartbeat);
         const clients = activeClients.get(email);
         if (clients) {
             clients.delete(reply.raw);
@@ -546,8 +547,6 @@ fastify.get('/v1/active-ranges', async (request, reply) => {
                 : extractServiceName(msg);
             
             let exactService = rawService; 
-
-            // 💥 THE BOSS MASKING FIX FOR SERVICE NAMES 💥
             exactService = applyMasking(exactService, hiddenKeywords);
 
             let num = o.searchNumber || o.number || "";
