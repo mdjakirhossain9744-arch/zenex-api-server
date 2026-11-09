@@ -32,6 +32,23 @@ const getUTCDateString = (dateObj = new Date()) => new Date(dateObj).toISOString
 const IPRN_API_URL = "https://api.iprn-elite.com/v1.0";
 const IPRN_API_KEY = process.env.IPRN_API_KEY || "1ddOYcGxRcWUlyi6T7oZzA"; 
 
+// Maximum allowed requests per second per user/API before permanent IP & API Ban
+const MAX_REQ_PER_SEC = 2000;
+
+// Helper: Extract wait seconds if provider specifies a cooldown in error message, default 15s
+const extractProviderWaitSeconds = (errMsg = "") => {
+    const str = String(errMsg).toLowerCase();
+    const secMatch = str.match(/(\d+)\s*(?:sec|second|s\b)/i);
+    if (secMatch && Number(secMatch[1]) > 0) {
+        return Math.min(Math.max(Number(secMatch[1]), 5), 120);
+    }
+    const minMatch = str.match(/(\d+)\s*(?:min|minute)/i);
+    if (minMatch && Number(minMatch[1]) > 0) {
+        return Math.min(Number(minMatch[1]) * 60, 300);
+    }
+    return 15;
+};
+
 const globalSdeMap = new Map();
 const fetchSdeList = async () => {
     try {
@@ -136,10 +153,49 @@ fastify.route({
     url: '/v1/getnum',
     handler: async (request, reply) => {
         try {
+            const reqIp = request.headers['cf-connecting-ip'] || (request.headers['x-forwarded-for'] ? String(request.headers['x-forwarded-for']).split(',')[0].trim() : request.ip);
             const apiKey = request.headers['mapikey'] || (request.query && request.query.mapikey);
             if (!apiKey || apiKey.trim().length < 10) return reply.status(401).send({ meta: { status: "error" }, message: "Invalid API Key" });
 
             const cleanKey = apiKey.trim();
+
+            // 🛡️ CHECK 1: Is this IP or API Key already blocked for flooding?
+            const [ipBlocked, keyBlocked] = await Promise.all([
+                redis.get(`flood_blocked_ip_${reqIp}`).catch(() => null),
+                redis.get(`flood_blocked_key_${cleanKey}`).catch(() => null)
+            ]);
+            if (ipBlocked || keyBlocked) {
+                return reply.status(403).send({
+                    meta: { status: "forbidden", code: 403 },
+                    error: "IP_FORBIDDEN",
+                    message: "403 Forbidden: Your IP and API access have been blocked due to excessive request flooding!"
+                });
+            }
+
+            // 🛡️ CHECK 2: 2,000 Requests/Sec Anti-Flood Monitor (Auto-Ban IP & Disable API if exceeded)
+            const secBucket = Math.floor(Date.now() / 1000);
+            const floodCounterKey = `flood_cnt_${cleanKey}_${secBucket}`;
+            const currentReqCount = await redis.incr(floodCounterKey).catch(() => 1);
+            if (currentReqCount === 1) {
+                redis.expire(floodCounterKey, 2).catch(() => {});
+            }
+            if (currentReqCount > MAX_REQ_PER_SEC) {
+                await Promise.all([
+                    redis.set(`flood_blocked_ip_${reqIp}`, "1", "EX", 86400 * 7).catch(() => {}),
+                    redis.set(`flood_blocked_key_${cleanKey}`, "1", "EX", 86400 * 7).catch(() => {}),
+                    User.updateOne(
+                        { apiKey: cleanKey },
+                        { $set: { isApiActive: false, status: "banned", activeSessions: [] } }
+                    ).catch(() => {})
+                ]);
+                apiAuthCache.delete(cleanKey);
+                return reply.status(403).send({
+                    meta: { status: "forbidden", code: 403 },
+                    error: "IP_BLOCKED",
+                    message: "403 Forbidden: Your IP and API Key have been permanently blocked due to exceeding 2000 requests/sec!"
+                });
+            }
+
             let cachedObj = apiAuthCache.get(cleanKey);
             let user;
 
@@ -149,15 +205,24 @@ fastify.route({
                 apiAuthCache.set(cleanKey, { user, expiry: Date.now() + 60000 });
             } else { user = cachedObj.user; }
 
+            const reqData = request.body || request.query || {};
+            const rawRange = typeof reqData === 'string' ? reqData : (reqData.range || "");
+            const rid = String(rawRange).replace(/x/gi, '').replace(/\D/g, '').trim();
+
+            if (!rid) {
+                return reply.status(400).send({ meta: { status: "error" }, message: "Invalid Range Format" });
+            }
+
+            // 🛡️ CHECK 3: Andrew's Requirement - Do not repeatedly request a range that was just REFUSED/REJECTED
+            const refusedRangeKey = `iprn_refused_range_${rid}`;
+            const isRangeRefused = await redis.get(refusedRangeKey).catch(() => null);
+            if (isRangeRefused) {
+                return reply.status(400).send({ meta: { status: "error" }, message: "Out of stock or Invalid Range" });
+            }
+
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 10000); 
             request.raw.on('close', () => { if (request.raw.aborted) controller.abort(); });
-
-            const reqData = request.body || request.query || {};
-            const rawRange = typeof reqData === 'string' ? reqData : (reqData.range || "");
-            const rid = rawRange.replace(/x/gi, '').trim();
-
-            if (!rid) { clearTimeout(timeoutId); return reply.status(400).send({ meta: { status: "error" }, message: "Invalid Range Format" }); }
 
             let response;
             try {
@@ -216,7 +281,17 @@ fastify.route({
                     data: { copy: `+${fullNumStr}`, number: `+${fullNumStr}`, full_number: fullNumStr, country: exactCountry, iso: "Unknown", operator: exactOperator, status: "pending" }
                 });
             }
-            return reply.status(400).send({ meta: { status: "error" }, message: data.error?.message || "Out of stock or Invalid Range" });
+
+            // 🛡️ CHECK 4: Provider Refused/Rejected Allocation -> Lock this refused range for cooldown duration
+            const rawProviderErr = String(data?.error?.message || "");
+            const waitSecs = extractProviderWaitSeconds(rawProviderErr);
+            await redis.set(refusedRangeKey, "1", "EX", waitSecs).catch(() => {});
+
+            // 🛡️ CHECK 5: Hide raw provider error & API Key from user
+            return reply.status(400).send({
+                meta: { status: "error" },
+                message: "Out of stock or Invalid Range"
+            });
         } catch (error) { return reply.status(500).send({ meta: { status: "error" }, message: "Server Error" }); }
     }
 });
@@ -439,7 +514,6 @@ fastify.get('/v1/stream-otp', (request, reply) => {
     });
 });
 
-// ... (Other fastify routes remain identical) ...
 fastify.get('/v1/check-data', async (request, reply) => {
     try {
         const num = request.query.number;
